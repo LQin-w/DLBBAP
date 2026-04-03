@@ -251,10 +251,18 @@ def _save_checkpoint(
     torch.save(state, checkpoint_path)
 
 
+def _move_optimizer_state_to_device(optimizer, device: torch.device) -> None:
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if torch.is_tensor(value):
+                state[key] = value.to(device, non_blocking=True)
+
+
 def _restore_training_state(model, optimizer, scheduler, scaler, checkpoint_state: dict[str, Any]) -> int:
     unwrap_model(model).load_state_dict(checkpoint_state["model"])
     if optimizer is not None and checkpoint_state.get("optimizer") is not None:
         optimizer.load_state_dict(checkpoint_state["optimizer"])
+        _move_optimizer_state_to_device(optimizer, next(unwrap_model(model).parameters()).device)
     if scheduler is not None and checkpoint_state.get("scheduler") is not None:
         scheduler.load_state_dict(checkpoint_state["scheduler"])
     if scaler is not None and checkpoint_state.get("scaler") is not None:
@@ -465,6 +473,7 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
         train=False,
         relative_direction=config["model"].get("relative_target_direction", "boneage_minus_chronological"),
         epoch=9999,
+        logger=logger,
     )
     val_predictions.to_csv(run_dir / "val_predictions.csv", index=False)
     write_json(val_metrics, run_dir / "val_metrics.json")
@@ -486,6 +495,7 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
             train=False,
             relative_direction=config["model"].get("relative_target_direction", "boneage_minus_chronological"),
             epoch=10000,
+            logger=logger,
         )
         test_predictions.to_csv(run_dir / "test_predictions.csv", index=False)
         write_json(test_metrics, run_dir / "test_metrics.json")
