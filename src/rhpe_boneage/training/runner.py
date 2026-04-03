@@ -293,6 +293,13 @@ def _resolve_config(
     return config, checkpoint_state
 
 
+def _resolve_runtime_settings(config: dict[str, Any]) -> tuple[str, bool]:
+    runtime_cfg = config.get("runtime") or {}
+    requested_device = str(runtime_cfg.get("device") or "cuda:0")
+    allow_cpu_fallback = bool(runtime_cfg.get("allow_cpu_fallback", False))
+    return requested_device, allow_cpu_fallback
+
+
 def train_main(config_path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]:
     config, checkpoint_state = _resolve_config(
         config_path=config_path,
@@ -303,17 +310,23 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
     logger = setup_logger(run_dir)
     seed_everything(int(config["experiment"]["seed"]))
 
-    device, runtime = detect_runtime()
+    requested_device, allow_cpu_fallback = _resolve_runtime_settings(config)
+    device, runtime = detect_runtime(
+        requested_device=requested_device,
+        allow_cpu_fallback=allow_cpu_fallback,
+    )
     write_json(runtime.to_dict(), run_dir / "runtime.json")
     logger.info(
-        "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | gpus=%s",
+        "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s",
         runtime.torch_version,
         runtime.cuda_build,
         runtime.cuda_available,
+        runtime.requested_device,
+        runtime.selected_device,
         runtime.device_names,
     )
-    if device.type != "cuda":
-        logger.warning("当前环境未启用 CUDA，训练将自动回退到 CPU。代码默认仍以 CUDA 路径实现。")
+    if runtime.requested_device.startswith("cuda") and device.type != "cuda":
+        logger.warning("请求设备 %s 不可用，训练已回退到 CPU。", runtime.requested_device)
 
     payload, reports = _build_data_payload(config, run_dir, checkpoint_state=checkpoint_state)
     _log_reports(logger, reports)
@@ -493,8 +506,21 @@ def evaluate_main(
     logger = setup_logger(run_dir)
     seed_everything(int(config["experiment"]["seed"]))
 
-    device, runtime = detect_runtime()
+    requested_device, allow_cpu_fallback = _resolve_runtime_settings(config)
+    device, runtime = detect_runtime(
+        requested_device=requested_device,
+        allow_cpu_fallback=allow_cpu_fallback,
+    )
     write_json(runtime.to_dict(), run_dir / "runtime.json")
+    logger.info(
+        "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s",
+        runtime.torch_version,
+        runtime.cuda_build,
+        runtime.cuda_available,
+        runtime.requested_device,
+        runtime.selected_device,
+        runtime.device_names,
+    )
     payload, reports = _build_data_payload(config, run_dir, checkpoint_state=checkpoint_state, manual_split=manual_split)
     _log_reports(logger, reports)
     datasets, normalizers = _build_datasets(payload, config, checkpoint_state=checkpoint_state)
@@ -557,8 +583,21 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
         run_dir = _prepare_run_dir(trial_config, purpose="trial")
         logger_trial = setup_logger(run_dir, name=f"trial_{trial.number}")
         seed_everything(int(trial_config["experiment"]["seed"]))
-        device, runtime = detect_runtime()
+        requested_device, allow_cpu_fallback = _resolve_runtime_settings(trial_config)
+        device, runtime = detect_runtime(
+            requested_device=requested_device,
+            allow_cpu_fallback=allow_cpu_fallback,
+        )
         write_json(runtime.to_dict(), run_dir / "runtime.json")
+        logger_trial.info(
+            "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s",
+            runtime.torch_version,
+            runtime.cuda_build,
+            runtime.cuda_available,
+            runtime.requested_device,
+            runtime.selected_device,
+            runtime.device_names,
+        )
         payload, reports = _build_data_payload(trial_config, run_dir)
         _log_reports(logger_trial, reports)
         datasets, normalizers = _build_datasets(payload, trial_config, checkpoint_state=None)

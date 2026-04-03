@@ -3,6 +3,10 @@ experiment:
   output_root: outputs
   seed: 2026
 
+runtime:
+  device: cuda:0
+  allow_cpu_fallback: false
+
 data:
   dataset_root: dataset
   input_size: 384

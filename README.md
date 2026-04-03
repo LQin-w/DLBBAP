@@ -309,10 +309,11 @@ python scripts/tune.py --config configs/default.yaml
 
 ## 16. CUDA 与设备说明
 
-代码默认优先使用 CUDA：
+代码当前默认固定请求 `cuda:0`：
 
-- 若 `torch.cuda.is_available() == True`，自动使用 GPU
-- 若当前环境无法访问 GPU，会自动回退到 CPU，不会崩溃
+- 默认配置为 `runtime.device: cuda:0`
+- 若当前环境无法访问该 GPU，会直接报错，避免训练静默跑到 CPU
+- 如果你确实要改回 CPU，可显式设置 `--set runtime.device=cpu`
 
 当前这台机器的实测情况是：
 
@@ -320,7 +321,7 @@ python scripts/tune.py --config configs/default.yaml
 - 当前运行时 `cuda available = False`
 - `nvidia-smi` 被操作系统阻止，当前会话无法直接访问 GPU
 
-因此本工程代码路径以 CUDA 为主，但这次本地自检实际是按 CPU fallback 完成的。
+因此本工程代码路径以 CUDA 为主；如果当前会话看不到 GPU，需要先修复运行环境，再启动训练。
 
 ## 17. 安装步骤
 
@@ -336,6 +337,12 @@ python -m pip install -r requirements.txt
 
 ```bash
 python scripts/train.py --config configs/default.yaml
+```
+
+显式指定设备：
+
+```bash
+python scripts/train.py --config configs/default.yaml --set runtime.device=cuda:0
 ```
 
 常见覆盖示例：
@@ -515,8 +522,9 @@ python scripts/train.py --config configs/default.yaml
 
 处理：
 
-- 工程会自动回退 CPU
+- 现在默认会直接报错，不再静默回退 CPU
 - 若要真正使用 GPU，请先确认 `torch.cuda.is_available()` 为 `True`
+- 若临时只想在 CPU 跑，请显式传入 `--set runtime.device=cpu`
 
 ### 2. 测试集没有指标
 

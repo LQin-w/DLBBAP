@@ -16,25 +16,62 @@ class RuntimeInfo:
     cuda_available: bool
     device_count: int
     device_names: list[str]
+    requested_device: str
+    selected_device: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def detect_runtime() -> tuple[torch.device, RuntimeInfo]:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def _normalize_requested_device(requested_device: str | None) -> str:
+    normalized = (requested_device or "cuda:0").strip().lower()
+    if not normalized:
+        return "cuda:0"
+    if normalized == "cuda":
+        return "cuda:0"
+    if normalized not in {"cpu"} and not normalized.startswith("cuda:"):
+        raise ValueError(f"不支持的 device 配置: {requested_device}")
+    return normalized
+
+
+def detect_runtime(
+    requested_device: str | None = None,
+    allow_cpu_fallback: bool = False,
+) -> tuple[torch.device, RuntimeInfo]:
+    normalized_device = _normalize_requested_device(requested_device)
+    cuda_available = torch.cuda.is_available()
+    device_count = torch.cuda.device_count()
     names: list[str] = []
-    if torch.cuda.is_available():
-        for index in range(torch.cuda.device_count()):
+    if cuda_available:
+        for index in range(device_count):
             names.append(torch.cuda.get_device_name(index))
+
+    if normalized_device == "cpu":
+        device = torch.device("cpu")
+    elif cuda_available:
+        device = torch.device(normalized_device)
+        if device.index is not None and device.index >= device_count:
+            raise RuntimeError(
+                f"请求设备 {normalized_device}，但当前仅检测到 {device_count} 张可见 GPU。"
+            )
+        torch.cuda.set_device(device)
+    elif allow_cpu_fallback:
+        device = torch.device("cpu")
+    else:
+        raise RuntimeError(
+            f"请求设备 {normalized_device}，但当前 torch.cuda.is_available() == False。"
+        )
+
     runtime = RuntimeInfo(
         python=sys.version.replace("\n", " "),
         torch_version=torch.__version__,
         torchvision_version=__import__("torchvision").__version__,
         cuda_build=torch.version.cuda,
-        cuda_available=torch.cuda.is_available(),
-        device_count=torch.cuda.device_count(),
+        cuda_available=cuda_available,
+        device_count=device_count,
         device_names=names,
+        requested_device=normalized_device,
+        selected_device=str(device),
     )
     return device, runtime
 
