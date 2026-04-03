@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Any
 
-import torch
 import sys
+import torch
 
 
 @dataclass
@@ -122,3 +122,28 @@ def maybe_compile_model(model: torch.nn.Module, enabled: bool, logger) -> torch.
     except Exception as exc:  # pragma: no cover - 编译失败时的保护逻辑
         logger.warning("torch.compile: 启用失败，自动降级。原因: %s", exc)
         return model
+
+
+def log_device_probe(model: torch.nn.Module, device: torch.device, logger) -> None:
+    try:
+        model_device = next(model.parameters()).device
+    except StopIteration:
+        model_device = device
+
+    if device.type != "cuda":
+        logger.info("设备自检 | model_device=%s | selected_device=%s", model_device, device)
+        return
+
+    device_index = device.index if device.index is not None else torch.cuda.current_device()
+    probe = torch.empty(1, device=device)
+    properties = torch.cuda.get_device_properties(device_index)
+    logger.info(
+        "设备自检 | model_device=%s | probe_device=%s | current_device=%s | name=%s | total_memory_mb=%d | allocated_mb=%.1f | reserved_mb=%.1f",
+        model_device,
+        probe.device,
+        torch.cuda.current_device(),
+        properties.name,
+        int(properties.total_memory / (1024**2)),
+        torch.cuda.memory_allocated(device_index) / (1024**2),
+        torch.cuda.memory_reserved(device_index) / (1024**2),
+    )

@@ -16,13 +16,44 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
 
 
 def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
-    moved = {}
-    for key, value in batch.items():
+    def _move(value: Any):
         if torch.is_tensor(value):
-            moved[key] = value.to(device, non_blocking=True)
-        else:
-            moved[key] = value
-    return moved
+            return value.to(device, non_blocking=True)
+        if isinstance(value, dict):
+            return {key: _move(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_move(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(_move(item) for item in value)
+        return value
+
+    return {key: _move(value) for key, value in batch.items()}
+
+
+def _log_first_batch_device(
+    batch: dict[str, Any],
+    model: torch.nn.Module,
+    device: torch.device,
+    logger,
+    phase: str,
+    epoch: int | None,
+) -> None:
+    if logger is None:
+        return
+    try:
+        model_device = next(model.parameters()).device
+    except StopIteration:
+        model_device = device
+    logger.info(
+        "首个 batch | phase=%s | epoch=%s | model_device=%s | global_image=%s | local_images=%s | global_heatmap=%s | roi_vector=%s",
+        phase,
+        epoch,
+        model_device,
+        batch["global_image"].device,
+        batch["local_images"].device,
+        batch["global_heatmap"].device,
+        batch["roi_vector"].device,
+    )
 
 
 def build_training_target(
@@ -75,8 +106,10 @@ def run_epoch(
     scaler=None,
     gradient_clip: float | None = None,
     epoch: int | None = None,
+    logger=None,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
     model.train(train)
+    phase = "train" if train else "eval"
     amp_enabled = train and device.type == "cuda" and scaler is not None
     total_loss = 0.0
     total_count = 0
@@ -84,9 +117,11 @@ def run_epoch(
     y_pred: list[float] = []
     rows: list[dict[str, Any]] = []
 
-    progress = tqdm(loader, desc=f"{'train' if train else 'eval'}:{epoch}", leave=False)
-    for batch in progress:
+    progress = tqdm(loader, desc=f"{phase}:{epoch}", leave=False)
+    for batch_index, batch in enumerate(progress):
         batch = move_batch_to_device(batch, device)
+        if batch_index == 0:
+            _log_first_batch_device(batch, model, device, logger, phase=phase, epoch=epoch)
         has_target_mask = batch["has_target"].view(-1).bool()
 
         if train:
@@ -129,21 +164,30 @@ def run_epoch(
 
         batch_size = prediction.shape[0]
         if loss is not None:
-            total_loss += loss.item() * int(has_target_mask.sum().item())
-            total_count += int(has_target_mask.sum().item())
+            valid_count = int(has_target_mask.sum().item())
+            total_loss += float(loss.detach().item()) * valid_count
+            total_count += valid_count
+
+        has_target_cpu = batch["has_target"].detach().view(-1).cpu().numpy().astype(bool)
+        boneage_cpu = batch["boneage"].detach().view(-1).cpu().numpy()
+        pred_boneage_cpu = pred_boneage.detach().view(-1).cpu().numpy()
+        chronological_cpu = batch["chronological"].detach().view(-1).cpu().numpy()
+        male_index_cpu = batch["male_index"].detach().view(-1).cpu().numpy()
 
         for index in range(batch_size):
-            gt_value = float(batch["boneage"][index].item()) if bool(batch["has_target"][index].item()) else np.nan
-            pred_value = float(pred_boneage[index].item())
+            gt_value = float(boneage_cpu[index]) if has_target_cpu[index] else np.nan
+            pred_value = float(pred_boneage_cpu[index])
             abs_error = abs(pred_value - gt_value) if not np.isnan(gt_value) else np.nan
             if not np.isnan(gt_value):
+                chronological_value = float(chronological_cpu[index])
                 if relative_direction == "chronological_minus_boneage":
-                    relative_gt = float(batch["chronological"][index].item()) - gt_value
-                    relative_pred = float(batch["chronological"][index].item()) - pred_value
+                    relative_gt = chronological_value - gt_value
+                    relative_pred = chronological_value - pred_value
                 else:
-                    relative_gt = gt_value - float(batch["chronological"][index].item())
-                    relative_pred = pred_value - float(batch["chronological"][index].item())
+                    relative_gt = gt_value - chronological_value
+                    relative_pred = pred_value - chronological_value
             else:
+                chronological_value = float(chronological_cpu[index])
                 relative_gt = np.nan
                 relative_pred = np.nan
             rows.append(
@@ -152,8 +196,8 @@ def run_epoch(
                     "gt_boneage": gt_value,
                     "pred_boneage": pred_value,
                     "abs_error": abs_error,
-                    "sex": int(batch["male_index"][index].item()),
-                    "chronological": float(batch["chronological"][index].item()),
+                    "sex": int(male_index_cpu[index]),
+                    "chronological": chronological_value,
                     "gt_relative_boneage": relative_gt,
                     "pred_relative_boneage": relative_pred,
                 }

@@ -15,7 +15,7 @@ from ..data.dataset import DatasetStats
 from ..data.transforms import build_geometric_transform, build_image_intensity_transform
 from ..models import build_model
 from ..utils import detect_runtime, ensure_dir, seed_everything, setup_logger, suggest_dataloader_kwargs, write_json
-from ..utils.device import maybe_compile_model
+from ..utils.device import log_device_probe, maybe_compile_model
 from ..utils.io import timestamp
 from ..utils.plots import plot_history
 from .engine import run_epoch, unwrap_model
@@ -335,6 +335,7 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
     write_json(loader_kwargs, run_dir / "dataloader.json")
 
     model = build_model(config).to(device)
+    log_device_probe(model, device, logger)
     model = maybe_compile_model(model, bool(config["training"]["compile"]), logger)
     criterion = build_loss(config["training"]["loss"], config["training"]["smooth_l1_beta"])
     optimizer = _build_optimizer(unwrap_model(model), config)
@@ -372,6 +373,7 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
             scaler=scaler,
             gradient_clip=float(config["training"]["gradient_clip"]),
             epoch=epoch,
+            logger=logger,
         )
         val_metrics, val_predictions = run_epoch(
             model=model,
@@ -386,6 +388,7 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
             scaler=None,
             gradient_clip=None,
             epoch=epoch,
+            logger=logger,
         )
 
         if scheduler is not None:
@@ -531,6 +534,7 @@ def evaluate_main(
         raise ValueError(f"请求评估的 split 不存在: {split}")
 
     model = build_model(config).to(device)
+    log_device_probe(model, device, logger)
     unwrap_model(model).load_state_dict(checkpoint_state["model"])
     criterion = build_loss(config["training"]["loss"], config["training"]["smooth_l1_beta"])
 
@@ -544,6 +548,7 @@ def evaluate_main(
         train=False,
         relative_direction=config["model"].get("relative_target_direction", "boneage_minus_chronological"),
         epoch=0,
+        logger=logger,
     )
     predictions.to_csv(run_dir / f"{split}_predictions.csv", index=False)
     write_json(metrics, run_dir / f"{split}_metrics.json")
@@ -603,6 +608,7 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
         datasets, normalizers = _build_datasets(payload, trial_config, checkpoint_state=None)
         dataloaders, _ = _build_dataloaders(datasets, trial_config, device)
         model = build_model(trial_config).to(device)
+        log_device_probe(model, device, logger_trial)
         model = maybe_compile_model(model, bool(trial_config["training"]["compile"]), logger_trial)
         criterion = build_loss(trial_config["training"]["loss"], trial_config["training"]["smooth_l1_beta"])
         optimizer = _build_optimizer(unwrap_model(model), trial_config)
@@ -626,6 +632,7 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
                 scaler=scaler,
                 gradient_clip=float(trial_config["training"]["gradient_clip"]),
                 epoch=epoch,
+                logger=logger_trial,
             )
             val_metrics, _ = run_epoch(
                 model=model,
@@ -637,6 +644,7 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
                 train=False,
                 relative_direction=trial_config["model"].get("relative_target_direction", "boneage_minus_chronological"),
                 epoch=epoch,
+                logger=logger_trial,
             )
             value = val_metrics["mae"] if val_metrics["mae"] is not None else 1e9
             trial.report(value, step=epoch)
