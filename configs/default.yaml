@@ -81,7 +81,11 @@ training:
   compile: true
   best_metric: mae
   resume_checkpoint: null
+  progress_bar: true
   workers_override: null
+  prefetch_factor: null
+  persistent_workers: null
+  pin_memory: null
 
 debug:
   limit_train_samples: 0

@@ -18,6 +18,10 @@ class RuntimeInfo:
     device_names: list[str]
     requested_device: str
     selected_device: str
+    cudnn_benchmark: bool
+    tf32_matmul: bool
+    tf32_cudnn: bool
+    float32_matmul_precision: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -62,6 +66,24 @@ def detect_runtime(
             f"请求设备 {normalized_device}，但当前 torch.cuda.is_available() == False。"
         )
 
+    cudnn_benchmark = False
+    tf32_matmul = False
+    tf32_cudnn = False
+    matmul_precision = "default"
+    if device.type == "cuda":
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.benchmark = True
+            cudnn_benchmark = bool(torch.backends.cudnn.benchmark)
+            if hasattr(torch.backends.cudnn, "allow_tf32"):
+                torch.backends.cudnn.allow_tf32 = True
+                tf32_cudnn = bool(torch.backends.cudnn.allow_tf32)
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            tf32_matmul = bool(torch.backends.cuda.matmul.allow_tf32)
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+            matmul_precision = "high"
+
     runtime = RuntimeInfo(
         python=sys.version.replace("\n", " "),
         torch_version=torch.__version__,
@@ -72,6 +94,10 @@ def detect_runtime(
         device_names=names,
         requested_device=normalized_device,
         selected_device=str(device),
+        cudnn_benchmark=cudnn_benchmark,
+        tf32_matmul=tf32_matmul,
+        tf32_cudnn=tf32_cudnn,
+        float32_matmul_precision=matmul_precision,
     )
     return device, runtime
 
@@ -92,10 +118,13 @@ def suggest_dataloader_kwargs(
 
     if cpu_count <= 2:
         workers = 0
+    elif cpu_count <= 4:
+        workers = 2
     elif cpu_count <= 8:
-        workers = min(2, max(1, cpu_count - 1))
+        workers = min(4, max(2, cpu_count // 2))
     else:
-        workers = min(8, max(2, cpu_count // 2))
+        workers = min(12, max(4, cpu_count // 2))
+    if workers > 0:
         workers = min(workers, max(2, batch_size * 2))
 
     kwargs: dict[str, Any] = {
@@ -104,7 +133,7 @@ def suggest_dataloader_kwargs(
         "persistent_workers": workers > 0,
     }
     if workers > 0:
-        kwargs["prefetch_factor"] = 2
+        kwargs["prefetch_factor"] = 4 if use_cuda else 2
     return kwargs
 
 

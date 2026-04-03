@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import math
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,30 @@ from ..utils.plots import plot_history
 from .engine import run_epoch, unwrap_model
 from .losses import build_loss
 from .normalization import ScalarNormalizer
+
+
+def _safe_metric_value(value: float | None) -> float:
+    return value if value is not None else math.nan
+
+
+def _log_epoch_metrics(
+    logger,
+    epoch: int,
+    train_metrics: dict[str, Any],
+    val_metrics: dict[str, Any],
+    lr: float,
+) -> None:
+    logger.info(
+        "Epoch %d | train_loss=%.4f | val_loss=%.4f | train_mae=%.4f | val_mae=%.4f | train_mad=%.4f | val_mad=%.4f | lr=%.6g",
+        epoch,
+        _safe_metric_value(train_metrics.get("loss")),
+        _safe_metric_value(val_metrics.get("loss")),
+        _safe_metric_value(train_metrics.get("mae")),
+        _safe_metric_value(val_metrics.get("mae")),
+        _safe_metric_value(train_metrics.get("mad")),
+        _safe_metric_value(val_metrics.get("mad")),
+        lr,
+    )
 
 
 def _load_checkpoint_state(checkpoint_path: str | Path | None) -> dict[str, Any] | None:
@@ -148,18 +173,41 @@ def _build_datasets(
 def _build_dataloaders(datasets: dict[str, Any], config: dict[str, Any], device: torch.device) -> tuple[dict[str, DataLoader], dict[str, Any]]:
     training_cfg = config["training"]
     if training_cfg.get("workers_override") is not None:
+        workers = int(training_cfg["workers_override"])
         loader_kwargs = {
-            "num_workers": int(training_cfg["workers_override"]),
+            "num_workers": workers,
             "pin_memory": device.type == "cuda",
-            "persistent_workers": int(training_cfg["workers_override"]) > 0,
+            "persistent_workers": workers > 0,
         }
-        if loader_kwargs["num_workers"] > 0:
-            loader_kwargs["prefetch_factor"] = 2
+        if workers > 0:
+            default_prefetch = 4 if device.type == "cuda" else 2
+            loader_kwargs["prefetch_factor"] = int(training_cfg.get("prefetch_factor", default_prefetch))
     else:
         loader_kwargs = suggest_dataloader_kwargs(
             batch_size=int(training_cfg["batch_size"]),
             use_cuda=device.type == "cuda",
         )
+
+    if training_cfg.get("pin_memory") is not None:
+        loader_kwargs["pin_memory"] = bool(training_cfg["pin_memory"])
+
+    if loader_kwargs["num_workers"] > 0:
+        if training_cfg.get("persistent_workers") is not None:
+            loader_kwargs["persistent_workers"] = bool(training_cfg["persistent_workers"])
+        if training_cfg.get("prefetch_factor") is not None:
+            loader_kwargs["prefetch_factor"] = int(training_cfg["prefetch_factor"])
+        elif device.type == "cuda":
+            loader_kwargs["prefetch_factor"] = max(4, int(loader_kwargs.get("prefetch_factor", 2)))
+    else:
+        loader_kwargs.pop("prefetch_factor", None)
+        loader_kwargs["persistent_workers"] = False
+
+    if (
+        device.type == "cuda"
+        and loader_kwargs.get("pin_memory", False)
+        and "pin_memory_device" in inspect.signature(DataLoader.__init__).parameters
+    ):
+        loader_kwargs["pin_memory_device"] = str(device)
 
     dataloaders = {}
     if "train" in datasets:
@@ -325,13 +373,17 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
     )
     write_json(runtime.to_dict(), run_dir / "runtime.json")
     logger.info(
-        "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s",
+        "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s | cudnn_benchmark=%s | tf32_matmul=%s | tf32_cudnn=%s | matmul_precision=%s",
         runtime.torch_version,
         runtime.cuda_build,
         runtime.cuda_available,
         runtime.requested_device,
         runtime.selected_device,
         runtime.device_names,
+        runtime.cudnn_benchmark,
+        runtime.tf32_matmul,
+        runtime.tf32_cudnn,
+        runtime.float32_matmul_precision,
     )
     if runtime.requested_device.startswith("cuda") and device.type != "cuda":
         logger.warning("请求设备 %s 不可用，训练已回退到 CPU。", runtime.requested_device)
@@ -343,14 +395,19 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
     write_json(loader_kwargs, run_dir / "dataloader.json")
 
     model = build_model(config).to(device)
+    if device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
     log_device_probe(model, device, logger)
     model = maybe_compile_model(model, bool(config["training"]["compile"]), logger)
     criterion = build_loss(config["training"]["loss"], config["training"]["smooth_l1_beta"])
     optimizer = _build_optimizer(unwrap_model(model), config)
     scheduler = _build_scheduler(optimizer, config)
     scaler = None
-    if device.type == "cuda" and bool(config["training"]["amp"]):
+    use_amp = device.type == "cuda" and bool(config["training"]["amp"])
+    if use_amp:
         scaler = torch.amp.GradScaler("cuda", enabled=True)
+    show_progress = bool(config["training"].get("progress_bar", True))
+    total_epochs = int(config["training"]["epochs"])
 
     start_epoch = 1
     best_metric = None
@@ -367,8 +424,8 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
     best_checkpoint_path = run_dir / "best_model.pt"
     last_checkpoint_path = run_dir / "last_checkpoint.pt"
 
-    for epoch in range(start_epoch, int(config["training"]["epochs"]) + 1):
-        train_metrics, train_predictions = run_epoch(
+    for epoch in range(start_epoch, total_epochs + 1):
+        train_metrics, _ = run_epoch(
             model=model,
             loader=dataloaders["train"],
             criterion=criterion,
@@ -381,6 +438,10 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
             scaler=scaler,
             gradient_clip=float(config["training"]["gradient_clip"]),
             epoch=epoch,
+            total_epochs=total_epochs,
+            amp=use_amp,
+            show_progress=show_progress,
+            collect_predictions=False,
             logger=logger,
         )
         val_metrics, val_predictions = run_epoch(
@@ -396,6 +457,10 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
             scaler=None,
             gradient_clip=None,
             epoch=epoch,
+            total_epochs=total_epochs,
+            amp=use_amp,
+            show_progress=show_progress,
+            collect_predictions=True,
             logger=logger,
         )
 
@@ -446,16 +511,12 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
         history_rows.append(history_row)
         pd.DataFrame(history_rows).to_csv(run_dir / "history.csv", index=False)
 
-        logger.info(
-            "Epoch %d | train_loss=%.4f | val_loss=%.4f | train_mae=%.4f | val_mae=%.4f | train_mad=%.4f | val_mad=%.4f | lr=%.6g",
-            epoch,
-            history_row["train_loss"] if history_row["train_loss"] is not None else math.nan,
-            history_row["val_loss"] if history_row["val_loss"] is not None else math.nan,
-            history_row["train_mae"] if history_row["train_mae"] is not None else math.nan,
-            history_row["val_mae"] if history_row["val_mae"] is not None else math.nan,
-            history_row["train_mad"] if history_row["train_mad"] is not None else math.nan,
-            history_row["val_mad"] if history_row["val_mad"] is not None else math.nan,
-            history_row["lr"],
+        _log_epoch_metrics(
+            logger=logger,
+            epoch=epoch,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            lr=history_row["lr"],
         )
 
     history_df = pd.DataFrame(history_rows)
@@ -473,6 +534,10 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
         train=False,
         relative_direction=config["model"].get("relative_target_direction", "boneage_minus_chronological"),
         epoch=9999,
+        total_epochs=None,
+        amp=use_amp,
+        show_progress=show_progress,
+        collect_predictions=True,
         logger=logger,
     )
     val_predictions.to_csv(run_dir / "val_predictions.csv", index=False)
@@ -495,6 +560,10 @@ def train_main(config_path: str | Path, overrides: list[str] | None = None) -> d
             train=False,
             relative_direction=config["model"].get("relative_target_direction", "boneage_minus_chronological"),
             epoch=10000,
+            total_epochs=None,
+            amp=use_amp,
+            show_progress=show_progress,
+            collect_predictions=True,
             logger=logger,
         )
         test_predictions.to_csv(run_dir / "test_predictions.csv", index=False)
@@ -526,13 +595,17 @@ def evaluate_main(
     )
     write_json(runtime.to_dict(), run_dir / "runtime.json")
     logger.info(
-        "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s",
+        "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s | cudnn_benchmark=%s | tf32_matmul=%s | tf32_cudnn=%s | matmul_precision=%s",
         runtime.torch_version,
         runtime.cuda_build,
         runtime.cuda_available,
         runtime.requested_device,
         runtime.selected_device,
         runtime.device_names,
+        runtime.cudnn_benchmark,
+        runtime.tf32_matmul,
+        runtime.tf32_cudnn,
+        runtime.float32_matmul_precision,
     )
     payload, reports = _build_data_payload(config, run_dir, checkpoint_state=checkpoint_state, manual_split=manual_split)
     _log_reports(logger, reports)
@@ -544,9 +617,13 @@ def evaluate_main(
         raise ValueError(f"请求评估的 split 不存在: {split}")
 
     model = build_model(config).to(device)
+    if device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
     log_device_probe(model, device, logger)
     unwrap_model(model).load_state_dict(checkpoint_state["model"])
     criterion = build_loss(config["training"]["loss"], config["training"]["smooth_l1_beta"])
+    use_amp = device.type == "cuda" and bool(config["training"]["amp"])
+    show_progress = bool(config["training"].get("progress_bar", True))
 
     metrics, predictions = run_epoch(
         model=model,
@@ -558,6 +635,10 @@ def evaluate_main(
         train=False,
         relative_direction=config["model"].get("relative_target_direction", "boneage_minus_chronological"),
         epoch=0,
+        total_epochs=None,
+        amp=use_amp,
+        show_progress=show_progress,
+        collect_predictions=True,
         logger=logger,
     )
     predictions.to_csv(run_dir / f"{split}_predictions.csv", index=False)
@@ -605,31 +686,39 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
         )
         write_json(runtime.to_dict(), run_dir / "runtime.json")
         logger_trial.info(
-            "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s",
+            "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s | cudnn_benchmark=%s | tf32_matmul=%s | tf32_cudnn=%s | matmul_precision=%s",
             runtime.torch_version,
             runtime.cuda_build,
             runtime.cuda_available,
             runtime.requested_device,
             runtime.selected_device,
             runtime.device_names,
+            runtime.cudnn_benchmark,
+            runtime.tf32_matmul,
+            runtime.tf32_cudnn,
+            runtime.float32_matmul_precision,
         )
         payload, reports = _build_data_payload(trial_config, run_dir)
         _log_reports(logger_trial, reports)
         datasets, normalizers = _build_datasets(payload, trial_config, checkpoint_state=None)
         dataloaders, _ = _build_dataloaders(datasets, trial_config, device)
         model = build_model(trial_config).to(device)
+        if device.type == "cuda":
+            model = model.to(memory_format=torch.channels_last)
         log_device_probe(model, device, logger_trial)
         model = maybe_compile_model(model, bool(trial_config["training"]["compile"]), logger_trial)
         criterion = build_loss(trial_config["training"]["loss"], trial_config["training"]["smooth_l1_beta"])
         optimizer = _build_optimizer(unwrap_model(model), trial_config)
         scheduler = _build_scheduler(optimizer, trial_config)
         scaler = None
-        if device.type == "cuda" and bool(trial_config["training"]["amp"]):
+        use_amp = device.type == "cuda" and bool(trial_config["training"]["amp"])
+        if use_amp:
             scaler = torch.amp.GradScaler("cuda", enabled=True)
+        show_progress = bool(trial_config["training"].get("progress_bar", True))
 
         best_metric = None
         for epoch in range(1, int(trial_config["training"]["epochs"]) + 1):
-            run_epoch(
+            train_metrics, _ = run_epoch(
                 model=model,
                 loader=dataloaders["train"],
                 criterion=criterion,
@@ -642,6 +731,10 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
                 scaler=scaler,
                 gradient_clip=float(trial_config["training"]["gradient_clip"]),
                 epoch=epoch,
+                total_epochs=int(trial_config["training"]["epochs"]),
+                amp=use_amp,
+                show_progress=show_progress,
+                collect_predictions=False,
                 logger=logger_trial,
             )
             val_metrics, _ = run_epoch(
@@ -654,6 +747,10 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
                 train=False,
                 relative_direction=trial_config["model"].get("relative_target_direction", "boneage_minus_chronological"),
                 epoch=epoch,
+                total_epochs=int(trial_config["training"]["epochs"]),
+                amp=use_amp,
+                show_progress=show_progress,
+                collect_predictions=False,
                 logger=logger_trial,
             )
             value = val_metrics["mae"] if val_metrics["mae"] is not None else 1e9
@@ -663,6 +760,13 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
                     scheduler.step(value)
                 else:
                     scheduler.step()
+            _log_epoch_metrics(
+                logger=logger_trial,
+                epoch=epoch,
+                train_metrics=train_metrics,
+                val_metrics=val_metrics,
+                lr=optimizer.param_groups[0]["lr"],
+            )
             best_metric = value if best_metric is None else min(best_metric, value)
             if trial.should_prune():
                 raise optuna.TrialPruned()
