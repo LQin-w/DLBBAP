@@ -141,12 +141,32 @@ def suggest_dataloader_kwargs(
     return kwargs
 
 
+def _model_device(model: torch.nn.Module) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def _cuda_compile_is_available() -> bool:
+    try:
+        from torch.utils import _triton
+
+        return bool(_triton.has_triton())
+    except Exception:
+        return False
+
+
 def maybe_compile_model(model: torch.nn.Module, enabled: bool, logger) -> torch.nn.Module:
     if not enabled:
         logger.info("torch.compile: 配置关闭，跳过。")
         return model
     if not hasattr(torch, "compile"):
         logger.warning("torch.compile: 当前 torch 不支持，自动降级。")
+        return model
+    model_device = _model_device(model)
+    if model_device.type == "cuda" and not _cuda_compile_is_available():
+        logger.warning("torch.compile: 当前 CUDA 环境缺少可用 Triton，自动降级。")
         return model
     try:
         compiled = torch.compile(model)

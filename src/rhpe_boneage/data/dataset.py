@@ -57,6 +57,22 @@ def _safe_square_patch(image: np.ndarray, center_x: float, center_y: float, patc
     return patch
 
 
+def _sanitize_coco_bbox(image_shape: tuple[int, int], bbox: list[float]) -> list[float]:
+    height, width = image_shape
+    x_coord, y_coord, box_width, box_height = [float(value) for value in bbox]
+
+    x0 = min(max(x_coord, 0.0), float(width))
+    y0 = min(max(y_coord, 0.0), float(height))
+    x1 = min(max(x_coord + box_width, 0.0), float(width))
+    y1 = min(max(y_coord + box_height, 0.0), float(height))
+
+    clipped_width = max(x1 - x0, 1.0)
+    clipped_height = max(y1 - y0, 1.0)
+    x0 = min(x0, max(float(width) - clipped_width, 0.0))
+    y0 = min(y0, max(float(height) - clipped_height, 0.0))
+    return [x0, y0, clipped_width, clipped_height]
+
+
 def _crop_to_bbox_context(
     image: np.ndarray,
     heatmap: np.ndarray,
@@ -65,6 +81,7 @@ def _crop_to_bbox_context(
     margin_ratio: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float]]:
     height, width = image.shape
+    bbox = _sanitize_coco_bbox((height, width), bbox)
     x_coord, y_coord, box_width, box_height = bbox
     margin_x = box_width * margin_ratio
     margin_y = box_height * margin_ratio
@@ -161,6 +178,7 @@ class RHPEBoneAgeDataset(Dataset):
                 valid_indices.append(index)
                 valid_keypoints.append((float(x_coord), float(y_coord)))
 
+        bbox = _sanitize_coco_bbox(image.shape, bbox)
         transformed = self.geometric_transform(
             image=image,
             heatmap=heatmap,
@@ -172,6 +190,7 @@ class RHPEBoneAgeDataset(Dataset):
         transformed_image = transformed["image"]
         transformed_heatmap = transformed["heatmap"]
         transformed_bbox = transformed["bboxes"][0] if transformed["bboxes"] else [0.0, 0.0, float(image.shape[1]), float(image.shape[0])]
+        transformed_bbox = _sanitize_coco_bbox(transformed_image.shape, list(transformed_bbox))
 
         reconstructed = np.zeros((self.max_keypoints, 3), dtype=np.float32)
         for index, point in enumerate(keypoints[: self.max_keypoints]):
@@ -221,11 +240,14 @@ class RHPEBoneAgeDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
         image = np.array(Image.open(record["image_path"]).convert("L"), dtype=np.uint8)
-        bbox = list(record["bbox"])
+        bbox = _sanitize_coco_bbox(image.shape, list(record["bbox"]))
         keypoints = record["keypoints"][: self.max_keypoints]
         sigma = max(bbox[2], bbox[3]) * float(self.config["data"]["heatmap_sigma_ratio"])
         heatmap = generate_heatmap(image.shape[0], image.shape[1], keypoints, sigma=max(sigma, 6.0))
-        image, heatmap, keypoints_arr, bbox = self._transform_roi(image, heatmap, bbox, keypoints)
+        try:
+            image, heatmap, keypoints_arr, bbox = self._transform_roi(image, heatmap, bbox, keypoints)
+        except Exception as exc:
+            raise ValueError(f"样本 {record['id']} 在 ROI 几何变换阶段失败: {exc}") from exc
         if self.global_crop_mode == "bbox":
             image, heatmap, keypoints_arr, bbox = _crop_to_bbox_context(
                 image=image,

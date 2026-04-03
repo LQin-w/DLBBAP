@@ -413,7 +413,15 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="训练前 UI 参数配置面板")
     parser.add_argument("--config", default="configs/default.yaml", help="配置文件路径")
+    parser.add_argument("--set", dest="overrides", action="append", default=[], help="覆盖配置，格式 key=value")
+    parser.add_argument("--auto-run", action="store_true", help="不启动图形界面，直接按当前参数启动训练")
     args = parser.parse_args()
+
+    if args.auto_run:
+        from rhpe_boneage.training.runner import train_main
+
+        train_main(config_path=args.config, overrides=args.overrides)
+        return
 
     root = tk.Tk()
     TrainUI(root=root, config_path=args.config)

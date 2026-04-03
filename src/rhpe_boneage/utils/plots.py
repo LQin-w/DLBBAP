@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -12,8 +14,13 @@ def plot_history(history_df: pd.DataFrame, output_path: str | Path) -> None:
 
     plot_dir = Path(output_path).parent
     plot_dir.mkdir(parents=True, exist_ok=True)
-    os.environ["MPLCONFIGDIR"] = str(plot_dir / "mplconfig")
+    mplconfig_dir = Path(tempfile.mkdtemp(prefix="mplconfig_", dir=plot_dir))
+    os.environ["MPLCONFIGDIR"] = str(mplconfig_dir)
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
+    import matplotlib
+    matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))

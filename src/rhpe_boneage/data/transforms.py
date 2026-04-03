@@ -38,6 +38,8 @@ def build_geometric_transform(config: dict, is_train: bool) -> A.Compose:
             format="coco",
             label_fields=["bbox_labels"],
             min_visibility=0.0,
+            clip=True,
+            filter_invalid_bboxes=True,
         ),
         additional_targets={"heatmap": "image"},
     )
