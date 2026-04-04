@@ -3,11 +3,15 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import platform
+import queue
+import sys
 import threading
+import traceback
 import tkinter as tk
 from collections import OrderedDict
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any
 
 import yaml
@@ -55,6 +59,37 @@ STRICT_OPTIONS: dict[str, set[str]] = {
 
 HIDDEN_UI_PREFIXES: tuple[str, ...] = ("optuna.",)
 DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "configs" / "default.yaml"
+FONT_CANDIDATES_UI: tuple[str, ...] = (
+    "Noto Sans CJK SC",
+    "Noto Serif CJK SC",
+    "Noto Sans CJK JP",
+    "Source Han Sans SC",
+    "Source Han Sans CN",
+    "WenQuanYi Micro Hei",
+    "WenQuanYi Zen Hei",
+    "AR PL UMing CN",
+    "AR PL UKai CN",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "DengXian",
+    "PingFang SC",
+    "Heiti SC",
+    "SimHei",
+    "Arial Unicode MS",
+)
+FONT_CANDIDATES_MONO: tuple[str, ...] = (
+    "Sarasa Mono SC",
+    "Noto Sans Mono CJK SC",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "WenQuanYi Zen Hei Mono",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "Source Han Sans SC",
+    "PingFang SC",
+    "Heiti SC",
+    "SimHei",
+)
 
 OPTION_META: dict[str, tuple[str, str]] = {
     "experiment.name": ("实验名称", "本次实验的名称前缀，用于输出目录与日志标识。"),
@@ -300,11 +335,150 @@ def _validate_ui_value(dotted_key: str, value: Any) -> None:
     raise ValueError(f"{dotted_key} 仅支持以下取值: {allowed_text}")
 
 
+def _pick_available_font(candidates: tuple[str, ...], available_fonts: dict[str, str]) -> str | None:
+    for candidate in candidates:
+        matched = available_fonts.get(candidate.casefold())
+        if matched is not None:
+            return matched
+    return None
+
+
+def _set_tcl_system_encoding(root: tk.Misc) -> str:
+    """Force Tcl/Tk to use UTF-8 on Unix-like systems to avoid \\uXXXX fallback rendering."""
+
+    try:
+        current_encoding = str(root.tk.call("encoding", "system"))
+    except tk.TclError:
+        return ""
+
+    normalized = current_encoding.strip().lower()
+    if normalized in {"utf-8", "utf8"}:
+        return current_encoding
+
+    preferred_encodings = ("utf-8",)
+    if platform.system().lower().startswith("win"):
+        preferred_encodings = ("utf-8", current_encoding)
+
+    for encoding_name in preferred_encodings:
+        try:
+            root.tk.call("encoding", "system", encoding_name)
+            return str(root.tk.call("encoding", "system"))
+        except tk.TclError:
+            continue
+    return current_encoding
+
+
+def _configure_tk_font_fallback(root: tk.Misc) -> dict[str, str]:
+    """Prefer installed CJK-capable fonts, but keep Tk defaults as a safe fallback."""
+
+    available_fonts = {family.casefold(): family for family in tkfont.families(root)}
+    ui_family = _pick_available_font(FONT_CANDIDATES_UI, available_fonts)
+    mono_family = _pick_available_font(FONT_CANDIDATES_MONO, available_fonts) or ui_family
+
+    named_fonts = ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkCaptionFont", "TkTooltipFont")
+    if ui_family:
+        for font_name in named_fonts:
+            try:
+                tkfont.nametofont(font_name).configure(family=ui_family)
+            except tk.TclError:
+                continue
+    if mono_family:
+        try:
+            tkfont.nametofont("TkFixedFont").configure(family=mono_family)
+        except tk.TclError:
+            pass
+
+    return {
+        "ui_family": ui_family or "",
+        "mono_family": mono_family or ui_family or "",
+    }
+
+
+def _apply_ttk_font_styles(root: tk.Misc, font_info: dict[str, str]) -> None:
+    """ttk themes on Linux do not always honor Tk named fonts, so configure styles directly."""
+
+    default_font = tkfont.nametofont("TkDefaultFont")
+    text_font = tkfont.nametofont("TkTextFont")
+    fixed_font = tkfont.nametofont("TkFixedFont")
+    style = ttk.Style(root)
+    style.configure(".", font=default_font)
+    for style_name in ("TLabel", "TButton", "TCheckbutton", "TRadiobutton", "TMenubutton", "TLabelframe"):
+        style.configure(style_name, font=default_font)
+    for style_name in ("TEntry", "TCombobox", "TSpinbox"):
+        style.configure(style_name, font=text_font)
+    style.configure("Treeview", font=text_font)
+    style.configure("Treeview.Heading", font=default_font)
+
+    default_font_desc = (default_font.cget("family"), default_font.cget("size"))
+    fixed_font_desc = (fixed_font.cget("family"), fixed_font.cget("size"))
+    root.option_add("*Font", default_font_desc)
+    root.option_add("*Text.font", fixed_font_desc)
+    root.option_add("*Entry.font", text_font)
+    root.option_add("*Listbox.font", text_font)
+    root.option_add("*TCombobox*Listbox.font", text_font)
+
+
+class _UiTextStream:
+    """Tee stdout/stderr to the terminal and to the UI log box with UTF-8-safe writes."""
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    def __init__(self, owner: "TrainUI", original_stream) -> None:
+        self.owner = owner
+        self.original_stream = original_stream
+
+    def write(self, data: Any) -> int:
+        if data is None:
+            return 0
+        if isinstance(data, bytes):
+            text = data.decode("utf-8", errors="replace")
+        else:
+            text = str(data)
+        if not text:
+            return 0
+        if self.original_stream is not None:
+            try:
+                self.original_stream.write(text)
+            except UnicodeEncodeError:
+                safe_text = text.encode(
+                    getattr(self.original_stream, "encoding", "utf-8") or "utf-8",
+                    errors="replace",
+                ).decode(getattr(self.original_stream, "encoding", "utf-8") or "utf-8", errors="replace")
+                self.original_stream.write(safe_text)
+        if getattr(self.owner, "_output_capture_enabled", False):
+            self.owner.enqueue_output(text)
+        return len(text)
+
+    def flush(self) -> None:
+        if self.original_stream is not None and hasattr(self.original_stream, "flush"):
+            self.original_stream.flush()
+
+    def isatty(self) -> bool:
+        if self.original_stream is not None and hasattr(self.original_stream, "isatty"):
+            return bool(self.original_stream.isatty())
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        if self.original_stream is None or not hasattr(self.original_stream, "fileno"):
+            raise OSError("underlying stream has no file descriptor")
+        return self.original_stream.fileno()
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self.original_stream, item)
+
+
 class TrainUI:
     def __init__(self, root: tk.Tk, config_path: str) -> None:
         self.root = root
         self.root.title("RHPE BoneAge Training UI")
-        self.root.geometry("907x820")
+        self.root.geometry("980x900")
+        self.tk_system_encoding = _set_tcl_system_encoding(self.root)
+        self.font_info = _configure_tk_font_fallback(self.root)
+        _apply_ttk_font_styles(self.root, self.font_info)
 
         self.config_path_var = tk.StringVar(value=config_path)
         self.status_var = tk.StringVar(value="就绪")
@@ -312,9 +486,25 @@ class TrainUI:
         self.base_flat: OrderedDict[str, Any] = OrderedDict()
         self.loaded_config: dict[str, Any] = {}
         self.running = False
+        self.log_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._log_flush_scheduled = False
+        self._max_log_chars = 200_000
+        self._output_capture_enabled = True
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+        self._stdout_proxy = _UiTextStream(self, self._original_stdout)
+        self._stderr_proxy = _UiTextStream(self, self._original_stderr)
 
         self._build_layout()
+        self._install_output_redirects()
+        self.root.protocol("WM_DELETE_WINDOW", self._handle_close)
         self._load_config_into_form(config_path)
+        if self.tk_system_encoding:
+            self.enqueue_output(f"[UI] Tcl/Tk system encoding: {self.tk_system_encoding}\n")
+        if self.font_info["ui_family"]:
+            self.enqueue_output(f"[UI] 已启用中文字体: {self.font_info['ui_family']}\n")
+        else:
+            self.enqueue_output("[UI] 未找到显式中文字体，当前使用 Tk 默认字体。\n")
 
     def _build_layout(self) -> None:
         top = ttk.Frame(self.root, padding=10)
@@ -333,8 +523,16 @@ class TrainUI:
         body = ttk.Frame(self.root, padding=(10, 0, 10, 0))
         body.pack(fill=tk.BOTH, expand=True)
 
-        self.canvas = tk.Canvas(body, highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.canvas.yview)
+        pane = ttk.Panedwindow(body, orient=tk.VERTICAL)
+        pane.pack(fill=tk.BOTH, expand=True)
+
+        form_container = ttk.Frame(pane)
+        log_container = ttk.LabelFrame(pane, text="训练输出", padding=(8, 8))
+        pane.add(form_container, weight=4)
+        pane.add(log_container, weight=2)
+
+        self.canvas = tk.Canvas(form_container, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(form_container, orient=tk.VERTICAL, command=self.canvas.yview)
         self.form_frame = ttk.Frame(self.canvas)
 
         self.form_frame.bind(
@@ -347,13 +545,82 @@ class TrainUI:
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        log_toolbar = ttk.Frame(log_container)
+        log_toolbar.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(log_toolbar, text="stdout / stderr / logger").pack(side=tk.LEFT)
+        ttk.Button(log_toolbar, text="清空输出", command=self._clear_output).pack(side=tk.RIGHT)
+
+        log_font = tkfont.nametofont("TkFixedFont").copy()
+        log_font.configure(size=10)
+        self.output_text = scrolledtext.ScrolledText(
+            log_container,
+            wrap=tk.WORD,
+            height=12,
+            state=tk.DISABLED,
+            font=log_font,
+        )
+        self.output_text.pack(fill=tk.BOTH, expand=True)
+
         bottom = ttk.Frame(self.root, padding=10)
         bottom.pack(fill=tk.X)
 
         ttk.Label(bottom, textvariable=self.status_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.progress = ttk.Progressbar(bottom, mode="indeterminate", length=180)
+        self.progress.pack(side=tk.RIGHT, padx=(8, 8))
         self.run_button = ttk.Button(bottom, text="开始训练", command=self._start_training)
         self.run_button.pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Button(bottom, text="恢复默认值", command=self._reset_to_defaults).pack(side=tk.RIGHT)
+
+    def _install_output_redirects(self) -> None:
+        sys.stdout = self._stdout_proxy
+        sys.stderr = self._stderr_proxy
+
+    def _restore_output_redirects(self) -> None:
+        if sys.stdout is self._stdout_proxy:
+            sys.stdout = self._original_stdout
+        if sys.stderr is self._stderr_proxy:
+            sys.stderr = self._original_stderr
+
+    def _handle_close(self) -> None:
+        self._output_capture_enabled = False
+        self._restore_output_redirects()
+        self.root.destroy()
+
+    def enqueue_output(self, text: str) -> None:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        self.log_queue.put(normalized)
+        if not self._log_flush_scheduled:
+            self._log_flush_scheduled = True
+            self.root.after(30, self._flush_output)
+
+    def _flush_output(self) -> None:
+        chunks: list[str] = []
+        while True:
+            try:
+                chunks.append(self.log_queue.get_nowait())
+            except queue.Empty:
+                break
+        self._log_flush_scheduled = False
+        if not chunks:
+            return
+
+        self.output_text.configure(state=tk.NORMAL)
+        self.output_text.insert(tk.END, "".join(chunks))
+        last_line = int(self.output_text.index("end-1c").split(".")[0])
+        max_lines = max(1000, self._max_log_chars // 80)
+        if last_line > max_lines:
+            self.output_text.delete("1.0", f"{last_line - max_lines}.0")
+        self.output_text.see(tk.END)
+        self.output_text.configure(state=tk.DISABLED)
+
+        if not self.log_queue.empty():
+            self._log_flush_scheduled = True
+            self.root.after(30, self._flush_output)
+
+    def _clear_output(self) -> None:
+        self.output_text.configure(state=tk.NORMAL)
+        self.output_text.delete("1.0", tk.END)
+        self.output_text.configure(state=tk.DISABLED)
 
     def _choose_config(self) -> None:
         selected = filedialog.askopenfilename(
@@ -569,13 +836,19 @@ class TrainUI:
         self.running = running
         self.status_var.set(message)
         self.run_button.configure(state=tk.DISABLED if running else tk.NORMAL)
+        if running:
+            self.progress.start(10)
+        else:
+            self.progress.stop()
 
     def _handle_training_success(self, run_dir: str) -> None:
         self._set_running(False, f"训练完成。输出目录: {run_dir}")
+        self.enqueue_output(f"\n[UI] 训练完成，输出目录: {run_dir}\n")
         messagebox.showinfo("训练完成", f"训练已完成。\n输出目录:\n{run_dir}")
 
     def _handle_training_error(self, error_text: str) -> None:
         self._set_running(False, "训练失败。")
+        self.enqueue_output(f"\n[UI] 训练失败: {error_text}\n")
         messagebox.showerror("训练失败", error_text)
 
     def _start_training(self) -> None:
@@ -591,6 +864,13 @@ class TrainUI:
             messagebox.showerror("配置错误", str(exc))
             return
         self._set_running(True, "训练启动中...")
+        self.enqueue_output(
+            f"\n{'=' * 96}\n"
+            f"[UI] 启动训练 | config={config_path} | overrides={len(overrides)}\n"
+        )
+        if overrides:
+            for item in overrides:
+                self.enqueue_output(f"[UI] override | {item}\n")
 
         def _worker() -> None:
             try:
@@ -600,6 +880,7 @@ class TrainUI:
                 run_dir = result.get("run_dir", "")
                 self.root.after(0, self._handle_training_success, run_dir)
             except Exception as exc:
+                traceback.print_exc(file=sys.stderr)
                 self.root.after(0, self._handle_training_error, str(exc))
 
         thread = threading.Thread(target=_worker, daemon=True)
