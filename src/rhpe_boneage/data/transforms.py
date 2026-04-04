@@ -11,6 +11,7 @@ import cv2
 def build_geometric_transform(config: dict, is_train: bool) -> A.Compose:
     aug_cfg = config["augmentation"]
     input_size = int(config["data"]["input_size"])
+    horizontal_flip_p = min(max(float(aug_cfg.get("horizontal_flip_p", 0.5) or 0.5), 0.0), 1.0)
     transforms = []
     if is_train:
         transforms.append(
@@ -28,7 +29,7 @@ def build_geometric_transform(config: dict, is_train: bool) -> A.Compose:
             )
         )
         if aug_cfg.get("horizontal_flip", False):
-            transforms.append(A.HorizontalFlip(p=0.5))
+            transforms.append(A.HorizontalFlip(p=horizontal_flip_p))
 
     transforms.append(A.Resize(height=input_size, width=input_size, interpolation=cv2.INTER_LINEAR))
     return A.Compose(

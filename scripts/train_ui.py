@@ -11,7 +11,7 @@ import sys
 import threading
 import traceback
 import tkinter as tk
-from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any
@@ -28,7 +28,6 @@ except ModuleNotFoundError:
 
 PRESET_OPTIONS: dict[str, list[str]] = {
     "experiment.mode": ["enhanced", "simba", "bonet_like"],
-    "runtime.device": ["cuda:0", "cuda:1", "cpu"],
     "data.global_crop_mode": ["bbox", "full"],
     "data.normalization.source": ["auto_train_stats", "manual"],
     "model.ensemble_mode": ["ensemble", "resnet", "efficientnet"],
@@ -42,32 +41,14 @@ PRESET_OPTIONS: dict[str, list[str]] = {
     "training.optimizer": ["adamw", "adam", "sgd"],
     "training.scheduler": ["plateau", "cosine", "none"],
     "training.loss": ["smoothl1", "l1", "mse"],
-    "training.compile_mode": ["reduce-overhead", "default", "max-autotune"],
     "training.best_metric": ["mae", "mad", "loss"],
-    "optuna.direction": ["minimize", "maximize"],
 }
 
 STRICT_OPTIONS: dict[str, set[str]] = {
-    "experiment.mode": {"enhanced", "simba", "bonet_like"},
-    "data.global_crop_mode": {"bbox", "full", "none", "image"},
-    "data.normalization.source": {"auto_train_stats", "manual"},
-    "model.ensemble_mode": {"ensemble", "resnet", "efficientnet"},
-    "model.resnet_name": {"resnet18", "resnet34", "resnet50"},
-    "model.efficientnet_name": {"efficientnet_b0", "efficientnet_b1", "efficientnet_b2"},
-    "model.branch_mode": {"global_local", "global_only", "local_only"},
-    "model.target_mode": {"relative", "direct"},
-    "model.relative_target_direction": {"boneage_minus_chronological", "chronological_minus_boneage"},
-    "model.metadata.mode": {"simba_hybrid", "simba_multiplier", "mlp"},
-    "model.local_branch.mode": {"patch_heatmap", "patch", "heatmap"},
-    "training.optimizer": {"adamw", "adam", "sgd"},
-    "training.scheduler": {"plateau", "cosine", "none"},
-    "training.loss": {"smoothl1", "l1", "mse"},
-    "training.compile_mode": {"reduce-overhead", "default", "max-autotune"},
-    "training.best_metric": {"mae", "mad", "loss"},
-    "optuna.direction": {"minimize", "maximize"},
+    key: {item.lower() for item in values}
+    for key, values in PRESET_OPTIONS.items()
 }
 
-HIDDEN_UI_PREFIXES: tuple[str, ...] = ("optuna.",)
 DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "configs" / "default.yaml"
 _SCIENTIFIC_NOTATION_PATTERN = re.compile(r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))[eE][+-]?\d+$")
 FONT_CANDIDATES_UI: tuple[str, ...] = (
@@ -101,16 +82,168 @@ FONT_CANDIDATES_MONO: tuple[str, ...] = (
     "Heiti SC",
     "SimHei",
 )
-FORM_HEADER_KEYS: tuple[str, ...] = (
-    "form.header.path",
-    "form.header.name",
-    "form.header.value",
-    "form.header.description",
+SECTION_TITLE_KEYS: dict[str, str] = {
+    "basic": "section.basic",
+    "method": "section.method",
+    "input": "section.input",
+    "augmentation": "section.augmentation",
+    "output": "section.output",
+    "advanced": "section.advanced",
+}
+SECTION_ORDER: tuple[str, ...] = ("basic", "method", "input", "augmentation", "output", "advanced")
+
+
+@dataclass(frozen=True)
+class UiFieldSpec:
+    path: str
+    group: str
+    kind: str
+    options: tuple[str, ...] = ()
+    minimum: float | None = None
+    maximum: float | None = None
+    increment: float | None = None
+    allow_none: bool = False
+    width: int = 18
+
+
+@dataclass
+class FieldBinding:
+    spec: UiFieldSpec
+    variable: tk.Variable
+    widget: tk.Widget
+    name_label: ttk.Label
+    desc_label: ttk.Label
+
+
+def _enum_field(path: str, group: str, width: int = 20) -> UiFieldSpec:
+    return UiFieldSpec(path=path, group=group, kind="enum", options=tuple(PRESET_OPTIONS[path]), width=width)
+
+
+def _bool_field(path: str, group: str) -> UiFieldSpec:
+    return UiFieldSpec(path=path, group=group, kind="bool", width=8)
+
+
+def _int_field(
+    path: str,
+    group: str,
+    *,
+    minimum: int,
+    maximum: int,
+    increment: int = 1,
+    width: int = 10,
+) -> UiFieldSpec:
+    return UiFieldSpec(
+        path=path,
+        group=group,
+        kind="int",
+        minimum=float(minimum),
+        maximum=float(maximum),
+        increment=float(increment),
+        width=width,
+    )
+
+
+def _float_field(
+    path: str,
+    group: str,
+    *,
+    minimum: float,
+    maximum: float,
+    increment: float,
+    allow_none: bool = False,
+    width: int = 12,
+) -> UiFieldSpec:
+    return UiFieldSpec(
+        path=path,
+        group=group,
+        kind="float",
+        minimum=minimum,
+        maximum=maximum,
+        increment=increment,
+        allow_none=allow_none,
+        width=width,
+    )
+
+
+def _text_field(path: str, group: str, width: int = 26) -> UiFieldSpec:
+    return UiFieldSpec(path=path, group=group, kind="text", width=width)
+
+
+VISIBLE_FIELD_SPECS: tuple[UiFieldSpec, ...] = (
+    _enum_field("experiment.mode", "basic"),
+    _text_field("experiment.name", "basic", width=30),
+    _int_field("experiment.seed", "basic", minimum=0, maximum=99999999),
+    _int_field("training.epochs", "basic", minimum=1, maximum=2000),
+    _int_field("training.batch_size", "basic", minimum=1, maximum=512),
+    _int_field("training.gradient_accumulation_steps", "basic", minimum=1, maximum=128),
+    _enum_field("training.optimizer", "basic"),
+    _float_field("training.lr", "basic", minimum=1e-7, maximum=1.0, increment=1e-5, width=14),
+    _float_field("training.weight_decay", "basic", minimum=0.0, maximum=1.0, increment=1e-5, width=14),
+    _enum_field("training.scheduler", "basic"),
+    _int_field("training.warmup_epochs", "basic", minimum=0, maximum=200),
+    _enum_field("training.loss", "basic"),
+    _enum_field("model.ensemble_mode", "method"),
+    _enum_field("model.resnet_name", "method"),
+    _enum_field("model.efficientnet_name", "method"),
+    _bool_field("model.pretrained", "method"),
+    _enum_field("model.branch_mode", "method"),
+    _enum_field("model.target_mode", "method"),
+    _enum_field("model.relative_target_direction", "method", width=28),
+    _bool_field("model.metadata.enabled", "method"),
+    _enum_field("model.metadata.mode", "method"),
+    _bool_field("model.heatmap_guidance.enabled", "method"),
+    _bool_field("model.cbam.enabled", "method"),
+    _bool_field("model.cbam.global_branch", "method"),
+    _bool_field("model.cbam.local_branch", "method"),
+    _int_field("data.input_size", "input", minimum=64, maximum=1024, increment=16),
+    _int_field("data.local_patch_size", "input", minimum=16, maximum=256, increment=8),
+    _enum_field("data.global_crop_mode", "input"),
+    _float_field("data.global_crop_margin_ratio", "input", minimum=0.0, maximum=1.0, increment=0.01),
+    _float_field("data.heatmap_sigma_ratio", "input", minimum=0.0, maximum=1.0, increment=0.005),
+    _float_field("data.heatmap_sigma_min", "input", minimum=0.0, maximum=64.0, increment=0.5),
+    _enum_field("data.normalization.source", "input"),
+    _float_field("data.normalization.mean", "input", minimum=0.0, maximum=1.0, increment=0.01, allow_none=True),
+    _float_field("data.normalization.std", "input", minimum=1e-6, maximum=1.0, increment=0.01, allow_none=True),
+    _enum_field("model.local_branch.mode", "input"),
+    _float_field("augmentation.affine_p", "augmentation", minimum=0.0, maximum=1.0, increment=0.05),
+    _float_field("augmentation.rotation_limit", "augmentation", minimum=0.0, maximum=90.0, increment=1.0),
+    _float_field("augmentation.translate_limit", "augmentation", minimum=0.0, maximum=0.5, increment=0.01),
+    _float_field("augmentation.scale_limit", "augmentation", minimum=0.0, maximum=0.5, increment=0.01),
+    _float_field("augmentation.shear_limit", "augmentation", minimum=0.0, maximum=30.0, increment=1.0),
+    _bool_field("augmentation.horizontal_flip", "augmentation"),
+    _float_field("augmentation.horizontal_flip_p", "augmentation", minimum=0.0, maximum=1.0, increment=0.05),
+    _bool_field("augmentation.use_noise", "augmentation"),
+    _float_field("augmentation.noise_std_min", "augmentation", minimum=0.0, maximum=0.5, increment=0.001),
+    _float_field("augmentation.noise_std_max", "augmentation", minimum=0.0, maximum=0.5, increment=0.001),
+    _float_field("augmentation.noise_p", "augmentation", minimum=0.0, maximum=1.0, increment=0.05),
+    _bool_field("augmentation.use_blur", "augmentation"),
+    _int_field("augmentation.blur_limit", "augmentation", minimum=3, maximum=31, increment=1),
+    _float_field("augmentation.blur_p", "augmentation", minimum=0.0, maximum=1.0, increment=0.05),
+    _enum_field("training.best_metric", "output"),
+    _int_field("training.early_stopping_patience", "output", minimum=0, maximum=100),
+    _float_field("training.early_stopping_min_delta", "output", minimum=0.0, maximum=10.0, increment=0.005),
+    _int_field("model.global_dim", "advanced", minimum=16, maximum=2048, increment=16),
+    _int_field("model.metadata.hidden_dim", "advanced", minimum=8, maximum=1024, increment=8),
+    _float_field("model.metadata.dropout", "advanced", minimum=0.0, maximum=0.9, increment=0.05),
+    _int_field("model.local_branch.feature_dim", "advanced", minimum=16, maximum=1024, increment=16),
+    _int_field("model.local_branch.geometry_dim", "advanced", minimum=8, maximum=512, increment=8),
+    _float_field("model.local_branch.dropout", "advanced", minimum=0.0, maximum=0.9, increment=0.05),
+    _int_field("model.head.hidden_dim", "advanced", minimum=8, maximum=2048, increment=16),
+    _float_field("model.head.dropout", "advanced", minimum=0.0, maximum=0.9, increment=0.05),
+    _float_field("training.momentum", "advanced", minimum=0.0, maximum=0.999, increment=0.01),
+    _float_field("training.warmup_start_factor", "advanced", minimum=1e-4, maximum=1.0, increment=0.05),
+    _float_field("training.min_lr", "advanced", minimum=0.0, maximum=1.0, increment=1e-6, width=14),
+    _float_field("training.smooth_l1_beta", "advanced", minimum=1e-4, maximum=10.0, increment=0.05),
+    _float_field("training.gradient_clip", "advanced", minimum=0.0, maximum=100.0, increment=0.1, allow_none=True),
+    _float_field("training.scheduler_factor", "advanced", minimum=1e-4, maximum=0.9999, increment=0.05),
+    _int_field("training.scheduler_patience", "advanced", minimum=0, maximum=50),
 )
+FIELD_SPEC_MAP: dict[str, UiFieldSpec] = {spec.path: spec for spec in VISIBLE_FIELD_SPECS}
+VISIBLE_FIELD_PATHS: tuple[str, ...] = tuple(spec.path for spec in VISIBLE_FIELD_SPECS)
 
 
-def _flatten_config(config: dict[str, Any], prefix: str = "") -> OrderedDict[str, Any]:
-    flat: OrderedDict[str, Any] = OrderedDict()
+def _flatten_config(config: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    flat: dict[str, Any] = {}
     for key, value in config.items():
         dotted = f"{prefix}.{key}" if prefix else key
         if isinstance(value, dict):
@@ -147,6 +280,15 @@ def _build_train_ui_config(config_path: Path, texts: UITextManager) -> tuple[dic
     return merged_config, selected_config
 
 
+def _lookup_nested_value(config: dict[str, Any], dotted_key: str, default: Any = None) -> Any:
+    current: Any = config
+    for key in dotted_key.split("."):
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
 def _assign_nested_value(config: dict[str, Any], dotted_key: str, value: Any) -> None:
     current = config
     keys = dotted_key.split(".")
@@ -157,10 +299,6 @@ def _assign_nested_value(config: dict[str, Any], dotted_key: str, value: Any) ->
             current[key] = child
         current = child
     current[keys[-1]] = value
-
-
-def _is_visible_in_train_ui(dotted_key: str) -> bool:
-    return not any(dotted_key.startswith(prefix) for prefix in HIDDEN_UI_PREFIXES)
 
 
 def _to_display_value(value: Any) -> str:
@@ -202,51 +340,6 @@ def _parse_value(raw: str) -> Any:
     return value
 
 
-def _float_suggestions(value: float) -> list[str]:
-    if value == 0:
-        return ["0.0", "0.1", "1.0"]
-    candidates = [value, value * 0.5, value * 2.0]
-    ordered: list[str] = []
-    for item in candidates:
-        shown = f"{item:.6g}"
-        if shown not in ordered:
-            ordered.append(shown)
-    return ordered
-
-
-def _int_suggestions(value: int) -> list[str]:
-    if value <= 0:
-        candidates = [value, 1, 2, 4]
-    else:
-        candidates = [value, max(1, value // 2), value * 2]
-    ordered: list[str] = []
-    for item in candidates:
-        shown = str(int(item))
-        if shown not in ordered:
-            ordered.append(shown)
-    return ordered
-
-
-def _build_options(path: str, value: Any) -> list[str]:
-    options = list(PRESET_OPTIONS.get(path, []))
-    if isinstance(value, bool):
-        options.extend(["true", "false"])
-    elif value is None:
-        options.append("null")
-    elif isinstance(value, int) and not isinstance(value, bool):
-        options.extend(_int_suggestions(value))
-    elif isinstance(value, float):
-        options.extend(_float_suggestions(value))
-    else:
-        options.append(_to_display_value(value))
-
-    deduped: list[str] = []
-    for item in options:
-        if item not in deduped:
-            deduped.append(item)
-    return deduped
-
-
 def _validate_ui_value(texts: UITextManager, dotted_key: str, value: Any) -> None:
     allowed = STRICT_OPTIONS.get(dotted_key)
     if allowed is None:
@@ -267,8 +360,6 @@ def _pick_available_font(candidates: tuple[str, ...], available_fonts: dict[str,
 
 
 def _set_tcl_system_encoding(root: tk.Misc) -> str:
-    """Force Tcl/Tk to use UTF-8 on Unix-like systems to avoid \\uXXXX fallback rendering."""
-
     try:
         current_encoding = str(root.tk.call("encoding", "system"))
     except tk.TclError:
@@ -292,8 +383,6 @@ def _set_tcl_system_encoding(root: tk.Misc) -> str:
 
 
 def _configure_tk_font_fallback(root: tk.Misc) -> dict[str, str]:
-    """Prefer installed CJK-capable fonts, but keep Tk defaults as a safe fallback."""
-
     available_fonts = {family.casefold(): family for family in tkfont.families(root)}
     ui_family = _pick_available_font(FONT_CANDIDATES_UI, available_fonts)
     mono_family = _pick_available_font(FONT_CANDIDATES_MONO, available_fonts) or ui_family
@@ -317,9 +406,7 @@ def _configure_tk_font_fallback(root: tk.Misc) -> dict[str, str]:
     }
 
 
-def _apply_ttk_font_styles(root: tk.Misc, font_info: dict[str, str]) -> None:
-    """ttk themes on Linux do not always honor Tk named fonts, so configure styles directly."""
-
+def _apply_ttk_font_styles(root: tk.Misc, _font_info: dict[str, str]) -> None:
     default_font = tkfont.nametofont("TkDefaultFont")
     text_font = tkfont.nametofont("TkTextFont")
     fixed_font = tkfont.nametofont("TkFixedFont")
@@ -342,8 +429,6 @@ def _apply_ttk_font_styles(root: tk.Misc, font_info: dict[str, str]) -> None:
 
 
 class _UiTextStream:
-    """Tee stdout/stderr to the terminal and to the UI log box with UTF-8-safe writes."""
-
     encoding = "utf-8"
     errors = "replace"
 
@@ -365,10 +450,8 @@ class _UiTextStream:
             try:
                 self.original_stream.write(text)
             except UnicodeEncodeError:
-                safe_text = text.encode(
-                    getattr(self.original_stream, "encoding", "utf-8") or "utf-8",
-                    errors="replace",
-                ).decode(getattr(self.original_stream, "encoding", "utf-8") or "utf-8", errors="replace")
+                encoding = getattr(self.original_stream, "encoding", "utf-8") or "utf-8"
+                safe_text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
                 self.original_stream.write(safe_text)
         if getattr(self.owner, "_output_capture_enabled", False):
             self.owner.enqueue_output(text)
@@ -400,7 +483,7 @@ class TrainUI:
         self.root = root
         self.texts = UITextManager()
         self.root.title(self.t("window.title"))
-        self.root.geometry("980x900")
+        self.root.geometry("1040x920")
         self.tk_system_encoding = _set_tcl_system_encoding(self.root)
         self.font_info = _configure_tk_font_fallback(self.root)
         _apply_ttk_font_styles(self.root, self.font_info)
@@ -408,13 +491,16 @@ class TrainUI:
         self.config_path_var = tk.StringVar(value=config_path)
         self.language_var = tk.StringVar(value=self.texts.get_language())
         self.status_var = tk.StringVar(value=self.t("status.ready"))
+        self.advanced_visible_var = tk.BooleanVar(value=False)
         self._status_key = "status.ready"
         self._status_kwargs: dict[str, Any] = {}
 
-        self.widgets: dict[str, ttk.Combobox] = {}
-        self.header_labels: list[ttk.Label] = []
-        self.field_rows: dict[str, dict[str, Any]] = {}
-        self.base_flat: OrderedDict[str, Any] = OrderedDict()
+        self.field_bindings: dict[str, FieldBinding] = {}
+        self.section_frames: dict[str, ttk.LabelFrame] = {}
+        self.advanced_header_label: ttk.Label | None = None
+        self.advanced_toggle_button: ttk.Button | None = None
+        self.advanced_body: ttk.Frame | None = None
+        self.base_values: dict[str, Any] = {}
         self.loaded_config: dict[str, Any] = {}
         self.running = False
         self.stop_requested = False
@@ -457,15 +543,7 @@ class TrainUI:
         self.save_config_button = ttk.Button(top, text=self.t("top.save_config"), command=self._save_current_config)
         self.save_config_button.pack(side=tk.LEFT, padx=(0, 8))
         self.reload_config_button = ttk.Button(top, text=self.t("top.reload"), command=self._reload_current_config)
-        self.reload_config_button.pack(side=tk.LEFT, padx=(0, 8))
-        self.select_resume_button = ttk.Button(
-            top,
-            text=self.t("top.select_resume"),
-            command=self._choose_resume_checkpoint,
-        )
-        self.select_resume_button.pack(side=tk.LEFT, padx=(0, 8))
-        self.clear_resume_button = ttk.Button(top, text=self.t("top.clear_resume"), command=self._clear_resume_checkpoint)
-        self.clear_resume_button.pack(side=tk.LEFT)
+        self.reload_config_button.pack(side=tk.LEFT)
 
         self.language_combo = ttk.Combobox(top, state="readonly", width=10, textvariable=self.language_var)
         self.language_combo.bind("<<ComboboxSelected>>", self._handle_language_selected)
@@ -487,14 +565,9 @@ class TrainUI:
         self.canvas = tk.Canvas(form_container, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(form_container, orient=tk.VERTICAL, command=self.canvas.yview)
         self.form_frame = ttk.Frame(self.canvas)
-
-        self.form_frame.bind(
-            "<Configure>",
-            lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
-        )
+        self.form_frame.bind("<Configure>", lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.create_window((0, 0), window=self.form_frame, anchor="nw")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
-
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -579,8 +652,6 @@ class TrainUI:
         self.select_config_button.configure(text=self.t("top.select_file"))
         self.save_config_button.configure(text=self.t("top.save_config"))
         self.reload_config_button.configure(text=self.t("top.reload"))
-        self.select_resume_button.configure(text=self.t("top.select_resume"))
-        self.clear_resume_button.configure(text=self.t("top.clear_resume"))
         self.language_label.configure(text=self.t("top.language"))
         self.log_container.configure(text=self.t("panel.training_output"))
         self.log_streams_label.configure(text=self.t("panel.output_streams"))
@@ -591,13 +662,23 @@ class TrainUI:
         self._render_status()
         self._refresh_form_texts()
 
+    def _field_description(self, dotted_key: str) -> str:
+        _name, description = self.texts.get_option_meta(dotted_key)
+        return description
+
     def _refresh_form_texts(self) -> None:
-        for label, key in zip(self.header_labels, FORM_HEADER_KEYS):
-            label.configure(text=self.t(key))
-        for dotted_key, row in self.field_rows.items():
-            name, desc = self.texts.get_option_meta(dotted_key)
-            row["name_label"].configure(text=name)
-            row["desc_label"].configure(text=desc)
+        for group, frame in self.section_frames.items():
+            frame.configure(text=self.t(SECTION_TITLE_KEYS[group]))
+        if self.advanced_header_label is not None:
+            self.advanced_header_label.configure(text=self.t(SECTION_TITLE_KEYS["advanced"]))
+        if self.advanced_toggle_button is not None:
+            self.advanced_toggle_button.configure(
+                text=self.t("button.hide_advanced") if self.advanced_visible_var.get() else self.t("button.show_advanced")
+            )
+        for dotted_key, binding in self.field_bindings.items():
+            name, _description = self.texts.get_option_meta(dotted_key)
+            binding.name_label.configure(text=name)
+            binding.desc_label.configure(text=self._field_description(dotted_key))
 
     def _handle_language_selected(self, _event: tk.Event | None = None) -> None:
         index = self.language_combo.current()
@@ -683,77 +764,292 @@ class TrainUI:
     def _reload_current_config(self) -> None:
         self._load_config_into_form(self.config_path_var.get().strip())
 
-    def _set_field_value(self, dotted_key: str, value: str) -> None:
-        widget = self.widgets.get(dotted_key)
-        if widget is None:
-            raise ValueError(self.t("error.form_field_missing", key=dotted_key))
-        widget.set(value)
-
-    def _choose_resume_checkpoint(self) -> None:
-        initial_value = ""
-        widget = self.widgets.get("training.resume_checkpoint")
-        if widget is not None:
-            current_value = widget.get().strip()
-            if current_value and current_value.lower() != "null":
-                initial_value = current_value
-        initial_dir = ""
-        initial_file = ""
-        if initial_value:
-            candidate = Path(initial_value)
-            if candidate.is_file():
-                initial_dir = str(candidate.parent)
-                initial_file = candidate.name
-        if not initial_dir:
-            initial_dir = str(Path("outputs").resolve())
-
-        selected = filedialog.askopenfilename(
-            title=self.t("file_dialog.select_resume"),
-            initialdir=initial_dir,
-            initialfile=initial_file,
-            filetypes=[
-                (self.t("filetype.checkpoint"), "*.pt *.pth *.ckpt"),
-                (self.t("filetype.all"), "*.*"),
-            ],
-        )
-        if not selected:
-            return
-        try:
-            self._set_field_value("training.resume_checkpoint", selected)
-        except ValueError as exc:
-            self._show_error_text("dialog.config_error_title", str(exc))
-            return
-        self._set_status("status.resume_selected", path=selected)
-
-    def _clear_resume_checkpoint(self) -> None:
-        try:
-            self._set_field_value("training.resume_checkpoint", "null")
-        except ValueError as exc:
-            self._show_error_text("dialog.config_error_title", str(exc))
-            return
-        self._set_status("status.resume_cleared")
-
     def _clear_form(self) -> None:
         for child in self.form_frame.winfo_children():
             child.destroy()
-        self.widgets.clear()
-        self.header_labels.clear()
-        self.field_rows.clear()
+        self.field_bindings.clear()
+        self.section_frames.clear()
+        self.advanced_header_label = None
+        self.advanced_toggle_button = None
+        self.advanced_body = None
+
+    def _display_field_value(self, spec: UiFieldSpec, value: Any) -> Any:
+        if spec.kind == "bool":
+            return bool(value)
+        if value is None:
+            return ""
+        if spec.kind == "text":
+            return normalize_visible_text(str(value))
+        return _to_display_value(value)
+
+    def _create_widget(self, parent: ttk.Frame, spec: UiFieldSpec, value: Any) -> tuple[tk.Variable, tk.Widget]:
+        if spec.kind == "bool":
+            variable = tk.BooleanVar(value=bool(value))
+            widget = ttk.Checkbutton(parent, variable=variable)
+            widget.pack(side=tk.RIGHT)
+            return variable, widget
+
+        initial_text = self._display_field_value(spec, value)
+        variable = tk.StringVar(value=str(initial_text))
+        if spec.kind == "enum":
+            widget = ttk.Combobox(parent, textvariable=variable, values=list(spec.options), state="readonly", width=spec.width)
+        elif spec.kind in {"int", "float"}:
+            widget = ttk.Spinbox(
+                parent,
+                textvariable=variable,
+                from_=spec.minimum if spec.minimum is not None else -1_000_000_000,
+                to=spec.maximum if spec.maximum is not None else 1_000_000_000,
+                increment=spec.increment if spec.increment is not None else 1.0,
+                width=spec.width,
+            )
+        else:
+            widget = ttk.Entry(parent, textvariable=variable, width=spec.width)
+        widget.pack(side=tk.RIGHT)
+        return variable, widget
+
+    def _build_section_frames(self) -> dict[str, ttk.Frame]:
+        containers: dict[str, ttk.Frame] = {}
+        for group in SECTION_ORDER:
+            if group == "advanced":
+                outer = ttk.Frame(self.form_frame)
+                outer.pack(fill=tk.X, pady=(0, 12))
+                header = ttk.Frame(outer)
+                header.pack(fill=tk.X)
+                self.advanced_header_label = ttk.Label(header, text=self.t(SECTION_TITLE_KEYS[group]))
+                self.advanced_header_label.pack(side=tk.LEFT)
+                self.advanced_toggle_button = ttk.Button(header, command=self._toggle_advanced)
+                self.advanced_toggle_button.pack(side=tk.RIGHT)
+                self.advanced_body = ttk.Frame(outer, padding=(10, 8, 10, 0))
+                if self.advanced_visible_var.get():
+                    self.advanced_body.pack(fill=tk.X)
+                containers[group] = self.advanced_body
+                continue
+
+            frame = ttk.LabelFrame(self.form_frame, text=self.t(SECTION_TITLE_KEYS[group]), padding=(10, 8))
+            frame.pack(fill=tk.X, pady=(0, 12))
+            self.section_frames[group] = frame
+            containers[group] = frame
+        self._refresh_form_texts()
+        return containers
+
+    def _build_field_row(self, container: ttk.Frame, spec: UiFieldSpec, value: Any) -> None:
+        row = ttk.Frame(container)
+        row.pack(fill=tk.X, pady=(0, 10))
+
+        head = ttk.Frame(row)
+        head.pack(fill=tk.X)
+        name, _description = self.texts.get_option_meta(spec.path)
+        name_label = ttk.Label(head, text=name)
+        name_label.pack(side=tk.LEFT, anchor="w")
+        variable, widget = self._create_widget(head, spec, value)
+        desc_label = ttk.Label(row, text=self._field_description(spec.path), justify=tk.LEFT, wraplength=760)
+        desc_label.pack(fill=tk.X, pady=(2, 0))
+
+        binding = FieldBinding(
+            spec=spec,
+            variable=variable,
+            widget=widget,
+            name_label=name_label,
+            desc_label=desc_label,
+        )
+        self.field_bindings[spec.path] = binding
+        variable.trace_add("write", self._handle_form_changed)
+
+    def _handle_form_changed(self, *_args: Any) -> None:
+        self._update_field_states()
+
+    def _toggle_advanced(self) -> None:
+        self.advanced_visible_var.set(not self.advanced_visible_var.get())
+        if self.advanced_body is not None:
+            if self.advanced_visible_var.get():
+                self.advanced_body.pack(fill=tk.X)
+            else:
+                self.advanced_body.pack_forget()
+        if self.advanced_toggle_button is not None:
+            self.advanced_toggle_button.configure(
+                text=self.t("button.hide_advanced") if self.advanced_visible_var.get() else self.t("button.show_advanced")
+            )
+
+    def _coerce_field_value(self, spec: UiFieldSpec, raw_value: Any, base_value: Any, *, strict: bool) -> Any:
+        if spec.kind == "bool":
+            return bool(raw_value)
+
+        text = str(raw_value).strip()
+        if text == "":
+            if base_value is not None or spec.kind == "text":
+                return base_value
+            if spec.allow_none:
+                return None
+            if strict:
+                raise ValueError(self.t("error.null_not_allowed", key=spec.path))
+            return base_value
+
+        if spec.kind == "text":
+            return normalize_visible_text(text)
+
+        if spec.kind == "enum":
+            _validate_ui_value(self.texts, spec.path, text)
+            return text
+
+        parsed = _parse_value(text)
+        if parsed is None:
+            if spec.allow_none:
+                return None
+            if strict:
+                raise ValueError(self.t("error.null_not_allowed", key=spec.path))
+            return base_value
+
+        if isinstance(parsed, bool):
+            if strict:
+                raise ValueError(f"{spec.path} 需要数值类型。")
+            return base_value
+
+        if spec.kind == "int":
+            if not isinstance(parsed, (int, float)) or not float(parsed).is_integer():
+                if strict:
+                    raise ValueError(f"{spec.path} 需要整数。")
+                return base_value
+            value = int(parsed)
+        else:
+            if not isinstance(parsed, (int, float)):
+                if strict:
+                    raise ValueError(f"{spec.path} 需要数值。")
+                return base_value
+            value = float(parsed)
+
+        if spec.minimum is not None and value < spec.minimum:
+            if strict:
+                raise ValueError(f"{spec.path} 不能小于 {spec.minimum}.")
+            value = base_value
+        if spec.maximum is not None and value > spec.maximum:
+            if strict:
+                raise ValueError(f"{spec.path} 不能大于 {spec.maximum}.")
+            value = base_value
+        return value
+
+    def _snapshot_form_values(self, *, strict: bool) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for spec in VISIBLE_FIELD_SPECS:
+            binding = self.field_bindings.get(spec.path)
+            if binding is None:
+                continue
+            raw_value = binding.variable.get()
+            base_value = self.base_values.get(spec.path)
+            try:
+                values[spec.path] = self._coerce_field_value(spec, raw_value, base_value, strict=strict)
+            except ValueError:
+                if strict:
+                    raise
+                values[spec.path] = base_value
+        return values
+
+    def _validate_cross_field_values(self, values: dict[str, Any]) -> None:
+        if values.get("data.normalization.source") == "manual":
+            mean = values.get("data.normalization.mean")
+            std = values.get("data.normalization.std")
+            if mean is None or std is None:
+                raise ValueError("data.normalization.source=manual 时必须填写 mean 和 std。")
+            if float(std) <= 0:
+                raise ValueError("data.normalization.std 必须大于 0。")
+        if bool(values.get("augmentation.use_noise")):
+            noise_min = float(values.get("augmentation.noise_std_min") or 0.0)
+            noise_max = float(values.get("augmentation.noise_std_max") or 0.0)
+            if noise_max < noise_min:
+                raise ValueError("augmentation.noise_std_max 不能小于 augmentation.noise_std_min。")
+        if str(values.get("training.scheduler") or "none").lower() == "plateau":
+            factor = float(values.get("training.scheduler_factor") or 0.0)
+            if not (0.0 < factor < 1.0):
+                raise ValueError("training.scheduler_factor 必须在 (0, 1) 范围内。")
+
+    def _field_enabled(self, path: str, values: dict[str, Any]) -> bool:
+        branch_mode = str(values.get("model.branch_mode") or "global_local").lower()
+        ensemble_mode = str(values.get("model.ensemble_mode") or "ensemble").lower()
+        metadata_enabled = bool(values.get("model.metadata.enabled"))
+        metadata_mode = str(values.get("model.metadata.mode") or "mlp").lower()
+        global_branch_enabled = branch_mode in {"global_only", "global_local"}
+        local_branch_enabled = branch_mode in {"local_only", "global_local"}
+        local_mode = str(values.get("model.local_branch.mode") or "patch_heatmap").lower()
+        heatmap_guidance = bool(values.get("model.heatmap_guidance.enabled"))
+        cbam_enabled = bool(values.get("model.cbam.enabled"))
+        normalization_manual = str(values.get("data.normalization.source") or "auto_train_stats").lower() == "manual"
+        scheduler_name = str(values.get("training.scheduler") or "none").lower()
+        optimizer_name = str(values.get("training.optimizer") or "adamw").lower()
+        loss_name = str(values.get("training.loss") or "smoothl1").lower()
+        warmup_epochs = int(values.get("training.warmup_epochs") or 0)
+        early_stop_patience = int(values.get("training.early_stopping_patience") or 0)
+        heatmap_used = heatmap_guidance or (local_branch_enabled and local_mode in {"heatmap", "patch_heatmap"})
+
+        if path == "model.pretrained":
+            return global_branch_enabled
+        if path == "model.resnet_name":
+            return global_branch_enabled and ensemble_mode in {"ensemble", "resnet"}
+        if path == "model.efficientnet_name":
+            return global_branch_enabled and ensemble_mode in {"ensemble", "efficientnet"}
+        if path == "model.relative_target_direction":
+            return str(values.get("model.target_mode") or "relative").lower() == "relative"
+        if path == "model.metadata.mode":
+            return metadata_enabled
+        if path in {"model.metadata.hidden_dim", "model.metadata.dropout"}:
+            return metadata_enabled and metadata_mode in {"mlp", "simba_hybrid"}
+        if path == "model.heatmap_guidance.enabled":
+            return global_branch_enabled
+        if path == "model.cbam.global_branch":
+            return cbam_enabled and global_branch_enabled
+        if path == "model.cbam.local_branch":
+            return cbam_enabled and local_branch_enabled
+        if path in {"data.local_patch_size", "model.local_branch.mode", "model.local_branch.feature_dim", "model.local_branch.geometry_dim", "model.local_branch.dropout"}:
+            return local_branch_enabled
+        if path == "model.global_dim":
+            return global_branch_enabled
+        if path == "data.global_crop_margin_ratio":
+            return str(values.get("data.global_crop_mode") or "bbox").lower() == "bbox"
+        if path in {"data.heatmap_sigma_ratio", "data.heatmap_sigma_min"}:
+            return heatmap_used
+        if path in {"data.normalization.mean", "data.normalization.std"}:
+            return normalization_manual
+        if path == "augmentation.horizontal_flip_p":
+            return bool(values.get("augmentation.horizontal_flip"))
+        if path in {"augmentation.noise_std_min", "augmentation.noise_std_max", "augmentation.noise_p"}:
+            return bool(values.get("augmentation.use_noise"))
+        if path in {"augmentation.blur_limit", "augmentation.blur_p"}:
+            return bool(values.get("augmentation.use_blur"))
+        if path == "training.momentum":
+            return optimizer_name == "sgd"
+        if path in {"training.scheduler_factor", "training.scheduler_patience"}:
+            return scheduler_name == "plateau"
+        if path == "training.min_lr":
+            return scheduler_name in {"plateau", "cosine"}
+        if path == "training.smooth_l1_beta":
+            return loss_name == "smoothl1"
+        if path == "training.warmup_start_factor":
+            return warmup_epochs > 0
+        if path == "training.early_stopping_min_delta":
+            return early_stop_patience > 0
+        return True
+
+    def _apply_widget_state(self, binding: FieldBinding, enabled: bool) -> None:
+        if binding.spec.kind == "bool":
+            if enabled:
+                binding.widget.state(["!disabled"])
+            else:
+                binding.widget.state(["disabled"])
+            return
+        if binding.spec.kind == "enum":
+            binding.widget.configure(state="readonly" if enabled else "disabled")
+            return
+        binding.widget.configure(state="normal" if enabled else "disabled")
+
+    def _update_field_states(self) -> None:
+        values = self._snapshot_form_values(strict=False)
+        for path, binding in self.field_bindings.items():
+            self._apply_widget_state(binding, self._field_enabled(path, values))
 
     def _collect_current_config(self) -> dict[str, Any]:
+        current_values = self._snapshot_form_values(strict=True)
+        self._validate_cross_field_values(current_values)
         current_config = copy.deepcopy(self.loaded_config)
-        for dotted_key, base_value in self.base_flat.items():
-            widget = self.widgets.get(dotted_key)
-            if widget is None:
-                continue
-            current_raw = widget.get()
-            if current_raw.strip() == "":
-                parsed_value = base_value
-            else:
-                parsed_value = _parse_value(current_raw)
-                if parsed_value is None and base_value is not None:
-                    raise ValueError(self.t("error.null_not_allowed", key=dotted_key))
-                _validate_ui_value(self.texts, dotted_key, parsed_value)
-            _assign_nested_value(current_config, dotted_key, parsed_value)
+        for dotted_key, value in current_values.items():
+            _assign_nested_value(current_config, dotted_key, value)
         return current_config
 
     def _save_current_config(self) -> None:
@@ -809,88 +1105,49 @@ class TrainUI:
         self.loaded_config = copy.deepcopy(merged_config)
         merged_flat = _flatten_config(merged_config)
         selected_flat = _flatten_config(selected_config)
-        hidden_count = 0
+        hidden_count = sum(1 for dotted_key in merged_flat if dotted_key not in FIELD_SPEC_MAP)
         added_from_default = 0
-        self.base_flat = OrderedDict()
-        for dotted_key, value in merged_flat.items():
-            if not _is_visible_in_train_ui(dotted_key):
-                hidden_count += 1
-                continue
-            if dotted_key not in selected_flat:
+        self.base_values = {}
+
+        section_containers = self._build_section_frames()
+        for spec in VISIBLE_FIELD_SPECS:
+            value = _lookup_nested_value(merged_config, spec.path, None)
+            self.base_values[spec.path] = value
+            if spec.path not in selected_flat:
                 added_from_default += 1
-            self.base_flat[dotted_key] = value
+            container = section_containers[spec.group]
+            self._build_field_row(container, spec, value)
 
-        for index, header_key in enumerate(FORM_HEADER_KEYS):
-            header_label = ttk.Label(self.form_frame, text=self.t(header_key))
-            header_label.grid(
-                row=0,
-                column=index,
-                sticky="w",
-                padx=(0, 8),
-                pady=(2, 8),
-            )
-            self.header_labels.append(header_label)
-
-        row = 1
-        for dotted_key, value in self.base_flat.items():
-            display_name, description = self.texts.get_option_meta(dotted_key)
-            path_label = ttk.Label(self.form_frame, text=dotted_key)
-            path_label.grid(row=row, column=0, sticky="nw", padx=(0, 8), pady=4)
-            name_label = ttk.Label(self.form_frame, text=display_name)
-            name_label.grid(row=row, column=1, sticky="nw", padx=(0, 8), pady=4)
-            options = _build_options(dotted_key, value)
-            combo = ttk.Combobox(self.form_frame, values=options, state="normal")
-            combo.set(_to_display_value(value))
-            combo.grid(row=row, column=2, sticky="ew", padx=(0, 8), pady=4)
-            self.widgets[dotted_key] = combo
-            desc_label = ttk.Label(
-                self.form_frame,
-                text=description,
-                justify=tk.LEFT,
-                wraplength=520,
-            )
-            desc_label.grid(row=row, column=3, sticky="nw", padx=(0, 8), pady=4)
-            self.field_rows[dotted_key] = {
-                "path_label": path_label,
-                "name_label": name_label,
-                "desc_label": desc_label,
-                "combo": combo,
-            }
-            row += 1
-
-        self.form_frame.columnconfigure(0, weight=2)
-        self.form_frame.columnconfigure(1, weight=2)
-        self.form_frame.columnconfigure(2, weight=1)
-        self.form_frame.columnconfigure(3, weight=4)
+        self._update_field_states()
         self._set_status(
             "status.config_loaded_summary",
-            visible_count=len(self.base_flat),
+            visible_count=len(self.base_values),
             default_count=added_from_default,
             hidden_count=hidden_count,
         )
 
     def _reset_to_defaults(self) -> None:
-        for dotted_key, value in self.base_flat.items():
-            widget = self.widgets.get(dotted_key)
-            if widget is not None:
-                widget.set(_to_display_value(value))
+        for spec in VISIBLE_FIELD_SPECS:
+            binding = self.field_bindings.get(spec.path)
+            if binding is None:
+                continue
+            base_value = self.base_values.get(spec.path)
+            if spec.kind == "bool":
+                binding.variable.set(bool(base_value))
+            else:
+                binding.variable.set(str(self._display_field_value(spec, base_value)))
+        self._update_field_states()
         self._set_status("status.defaults_restored")
 
     def _collect_overrides(self) -> list[str]:
+        current_values = self._snapshot_form_values(strict=True)
+        self._validate_cross_field_values(current_values)
         overrides: list[str] = []
-        for dotted_key, base_value in self.base_flat.items():
-            widget = self.widgets.get(dotted_key)
-            if widget is None:
-                continue
-            current_raw = widget.get()
-            if current_raw.strip() == "":
-                continue
-            parsed_value = _parse_value(current_raw)
-            if parsed_value is None and base_value is not None:
-                raise ValueError(self.t("error.null_not_allowed", key=dotted_key))
-            _validate_ui_value(self.texts, dotted_key, parsed_value)
-            if parsed_value != base_value:
-                overrides.append(f"{dotted_key}={_scalar_to_override(parsed_value)}")
+        for spec in VISIBLE_FIELD_SPECS:
+            base_value = self.base_values.get(spec.path)
+            current_value = current_values.get(spec.path)
+            if current_value != base_value:
+                overrides.append(f"{spec.path}={_scalar_to_override(current_value)}")
         return overrides
 
     def _set_running(self, running: bool, status_key: str, **status_kwargs: Any) -> None:
@@ -1007,7 +1264,7 @@ def main() -> None:
 
     root = tk.Tk()
     TrainUI(root=root, config_path=args.config)
-    root.minsize(747, 620)
+    root.minsize(780, 620)
     root.mainloop()
 
 

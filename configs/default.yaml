@@ -64,6 +64,7 @@ augmentation:
   scale_limit: 0.1
   shear_limit: 3
   horizontal_flip: false
+  horizontal_flip_p: 0.5
   use_noise: false
   noise_std_min: 0.005
   noise_std_max: 0.02
@@ -82,6 +83,8 @@ training:
   weight_decay: 0.0005
   momentum: 0.9
   scheduler: cosine
+  scheduler_factor: 0.5
+  scheduler_patience: 2
   warmup_epochs: 3
   warmup_start_factor: 0.2
   min_lr: 5.0e-6

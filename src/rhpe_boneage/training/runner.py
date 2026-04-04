@@ -387,6 +387,23 @@ def _describe_model_type(config: dict[str, Any]) -> str:
     return f"SingleBackboneModel({model_cfg.get('efficientnet_name')})"
 
 
+def _describe_augmentation_profile(config: dict[str, Any]) -> dict[str, Any]:
+    aug_cfg = config.get("augmentation") or {}
+    return {
+        "affine_p": float(aug_cfg.get("affine_p", 0.0) or 0.0),
+        "rotation_limit": float(aug_cfg.get("rotation_limit", 0.0) or 0.0),
+        "translate_limit": float(aug_cfg.get("translate_limit", 0.0) or 0.0),
+        "scale_limit": float(aug_cfg.get("scale_limit", 0.0) or 0.0),
+        "shear_limit": float(aug_cfg.get("shear_limit", 0.0) or 0.0),
+        "horizontal_flip": bool(aug_cfg.get("horizontal_flip", False)),
+        "horizontal_flip_p": float(aug_cfg.get("horizontal_flip_p", 0.5) or 0.5),
+        "use_noise": bool(aug_cfg.get("use_noise", False)),
+        "noise_p": float(aug_cfg.get("noise_p", 0.0) or 0.0),
+        "use_blur": bool(aug_cfg.get("use_blur", False)),
+        "blur_p": float(aug_cfg.get("blur_p", 0.0) or 0.0),
+    }
+
+
 def _log_epoch_header(
     logger,
     config: dict[str, Any],
@@ -674,15 +691,62 @@ def _build_config_summary(
     runtime,
     datasets: dict[str, Any],
 ) -> dict[str, Any]:
+    data_cfg = config.get("data") or {}
+    model_cfg = config.get("model") or {}
+    training_cfg = config.get("training") or {}
+    metadata_cfg = model_cfg.get("metadata") or {}
+    cbam_cfg = model_cfg.get("cbam") or {}
+    heatmap_guidance_cfg = model_cfg.get("heatmap_guidance") or {}
+    local_branch_cfg = model_cfg.get("local_branch") or {}
     normalization_cfg = (config.get("data") or {}).get("normalization") or {}
     return {
         "experiment_mode": str((config.get("experiment") or {}).get("mode") or "enhanced"),
         "model_type": _describe_model_type(config),
-        "metadata_mode": str(((config.get("model") or {}).get("metadata") or {}).get("mode") or "mlp"),
+        "metadata_mode": str(metadata_cfg.get("mode") or "mlp"),
         "input_modalities": _describe_input_modalities(config),
         "target_type": _describe_target(config),
         "dataset_size": {split: len(dataset) for split, dataset in datasets.items()},
         "device": runtime.selected_device,
+        "structure": {
+            "ensemble_mode": str(model_cfg.get("ensemble_mode") or "ensemble"),
+            "resnet_name": str(model_cfg.get("resnet_name") or "resnet18"),
+            "efficientnet_name": str(model_cfg.get("efficientnet_name") or "efficientnet_b0"),
+            "pretrained": bool(model_cfg.get("pretrained", False)),
+            "branch_mode": str(model_cfg.get("branch_mode") or "global_local"),
+            "local_branch_mode": str(local_branch_cfg.get("mode") or "patch_heatmap"),
+            "target_mode": str(model_cfg.get("target_mode") or "relative"),
+            "relative_target_direction": str(model_cfg.get("relative_target_direction") or "boneage_minus_chronological"),
+            "metadata_enabled": bool(metadata_cfg.get("enabled", True)),
+            "metadata_mode": str(metadata_cfg.get("mode") or "mlp"),
+            "heatmap_guidance": bool(heatmap_guidance_cfg.get("enabled", False)),
+            "cbam_enabled": bool(cbam_cfg.get("enabled", False)),
+            "cbam_global": bool(cbam_cfg.get("global_branch", False)),
+            "cbam_local": bool(cbam_cfg.get("local_branch", False)),
+        },
+        "data_strategy": {
+            "input_size": int(data_cfg.get("input_size", 0) or 0),
+            "local_patch_size": int(data_cfg.get("local_patch_size", 0) or 0),
+            "global_crop_mode": str(data_cfg.get("global_crop_mode") or "bbox"),
+            "global_crop_margin_ratio": float(data_cfg.get("global_crop_margin_ratio", 0.0) or 0.0),
+            "heatmap_sigma_ratio": float(data_cfg.get("heatmap_sigma_ratio", 0.0) or 0.0),
+            "heatmap_sigma_min": float(data_cfg.get("heatmap_sigma_min", 0.0) or 0.0),
+            "normalization_source": normalization_cfg.get("resolved_source") or normalization_cfg.get("source"),
+        },
+        "optimization": {
+            "epochs": int(training_cfg.get("epochs", 0) or 0),
+            "batch_size": int(training_cfg.get("batch_size", 0) or 0),
+            "gradient_accumulation_steps": int(training_cfg.get("gradient_accumulation_steps", 1) or 1),
+            "optimizer": str(training_cfg.get("optimizer") or "adamw").lower(),
+            "lr": float(training_cfg.get("lr", 0.0) or 0.0),
+            "weight_decay": float(training_cfg.get("weight_decay", 0.0) or 0.0),
+            "scheduler": str(training_cfg.get("scheduler") or "none").lower(),
+            "scheduler_factor": float(training_cfg.get("scheduler_factor", 0.5) or 0.5),
+            "scheduler_patience": int(training_cfg.get("scheduler_patience", 2) or 2),
+            "warmup_epochs": int(training_cfg.get("warmup_epochs", 0) or 0),
+            "loss": _describe_loss(config),
+            "best_metric": str(training_cfg.get("best_metric") or "mae").lower(),
+        },
+        "augmentation": _describe_augmentation_profile(config),
         "normalization": {
             "mean": normalization_cfg.get("mean"),
             "std": normalization_cfg.get("std"),
@@ -692,11 +756,73 @@ def _build_config_summary(
 
 
 def _log_config_summary(logger, summary: dict[str, Any]) -> None:
+    structure = summary["structure"]
+    data_strategy = summary["data_strategy"]
+    optimization = summary["optimization"]
+    augmentation = summary["augmentation"]
     logger.info("CONFIG SUMMARY:", extra=_phase_extra("SYSTEM"))
     logger.info("- model type: %s", summary["model_type"], extra=_phase_extra("SYSTEM"))
     logger.info("- metadata mode: %s", summary["metadata_mode"], extra=_phase_extra("SYSTEM"))
+    logger.info(
+        "- structure switches: ensemble=%s | branch=%s | local_mode=%s | target=%s | metadata=%s(%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s]",
+        structure["ensemble_mode"],
+        structure["branch_mode"],
+        structure["local_branch_mode"],
+        structure["target_mode"],
+        structure["metadata_enabled"],
+        structure["metadata_mode"],
+        structure["heatmap_guidance"],
+        structure["cbam_enabled"],
+        structure["cbam_global"],
+        structure["cbam_local"],
+        extra=_phase_extra("SYSTEM"),
+    )
+    logger.info(
+        "- backbones: resnet=%s | efficientnet=%s | pretrained=%s",
+        structure["resnet_name"],
+        structure["efficientnet_name"],
+        structure["pretrained"],
+        extra=_phase_extra("SYSTEM"),
+    )
     logger.info("- input modalities: %s", ", ".join(summary["input_modalities"]), extra=_phase_extra("SYSTEM"))
     logger.info("- target type: %s", summary["target_type"], extra=_phase_extra("SYSTEM"))
+    logger.info(
+        "- data strategy: input_size=%s | local_patch=%s | crop=%s | crop_margin=%s | sigma_ratio=%s | sigma_min=%s",
+        data_strategy["input_size"],
+        data_strategy["local_patch_size"],
+        data_strategy["global_crop_mode"],
+        _format_scalar(data_strategy["global_crop_margin_ratio"], precision=4),
+        _format_scalar(data_strategy["heatmap_sigma_ratio"], precision=4),
+        _format_scalar(data_strategy["heatmap_sigma_min"], precision=2),
+        extra=_phase_extra("SYSTEM"),
+    )
+    logger.info(
+        "- optimization: epochs=%s | batch=%s | grad_accum=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | loss=%s | best_metric=%s",
+        optimization["epochs"],
+        optimization["batch_size"],
+        optimization["gradient_accumulation_steps"],
+        optimization["optimizer"],
+        _format_lr(optimization["lr"]),
+        optimization["weight_decay"],
+        optimization["scheduler"],
+        _format_scalar(optimization["scheduler_factor"], precision=3),
+        optimization["scheduler_patience"],
+        optimization["warmup_epochs"],
+        optimization["loss"],
+        optimization["best_metric"],
+        extra=_phase_extra("SYSTEM"),
+    )
+    logger.info(
+        "- augmentation: affine_p=%s | flip=%s(p=%s) | noise=%s(p=%s) | blur=%s(p=%s)",
+        _format_scalar(augmentation["affine_p"], precision=2),
+        augmentation["horizontal_flip"],
+        _format_scalar(augmentation["horizontal_flip_p"], precision=2),
+        augmentation["use_noise"],
+        _format_scalar(augmentation["noise_p"], precision=2),
+        augmentation["use_blur"],
+        _format_scalar(augmentation["blur_p"], precision=2),
+        extra=_phase_extra("SYSTEM"),
+    )
     logger.info("- dataset size: %s", summary["dataset_size"], extra=_phase_extra("SYSTEM"))
     logger.info("- device: %s", summary["device"], extra=_phase_extra("SYSTEM"))
     logger.info(
@@ -725,6 +851,11 @@ def _build_effective_params_payload(
 ) -> dict[str, Any]:
     training_cfg = config["training"]
     runtime_cfg = config.get("runtime") or {}
+    model_cfg = config.get("model") or {}
+    metadata_cfg = model_cfg.get("metadata") or {}
+    cbam_cfg = model_cfg.get("cbam") or {}
+    local_branch_cfg = model_cfg.get("local_branch") or {}
+    augmentation_cfg = config.get("augmentation") or {}
     normalization_cfg = (config.get("data") or {}).get("normalization") or {}
     grad_accum_steps = _resolve_gradient_accumulation_steps(config)
     total_epochs = int(training_cfg["epochs"])
@@ -747,10 +878,13 @@ def _build_effective_params_payload(
         "lr": float(training_cfg["lr"]),
         "weight_decay": float(training_cfg["weight_decay"]),
         "scheduler": str(training_cfg.get("scheduler") or "none").lower(),
+        "scheduler_factor": float(training_cfg.get("scheduler_factor", 0.5) or 0.5),
+        "scheduler_patience": int(training_cfg.get("scheduler_patience", 2) or 2),
         "warmup_epochs": warmup_epochs,
         "warmup_start_factor": warmup_start_factor,
         "min_lr": float(training_cfg["min_lr"]),
         "loss": _describe_loss(config),
+        "best_metric": str(training_cfg.get("best_metric") or "mae").lower(),
         "amp": use_amp,
         "compile": bool(training_cfg["compile"]),
         "compile_mode": str(training_cfg.get("compile_mode") or "default"),
@@ -766,10 +900,30 @@ def _build_effective_params_payload(
         "input_size": int(config["data"]["input_size"]),
         "local_patch_size": int(config["data"]["local_patch_size"]),
         "global_crop_mode": str(config["data"].get("global_crop_mode")),
+        "global_crop_margin_ratio": float(config["data"].get("global_crop_margin_ratio", 0.0) or 0.0),
+        "heatmap_sigma_ratio": float(config["data"].get("heatmap_sigma_ratio", 0.0) or 0.0),
+        "heatmap_sigma_min": float(config["data"].get("heatmap_sigma_min", 0.0) or 0.0),
         "model_type": _describe_model_type(config),
+        "ensemble_mode": str(model_cfg.get("ensemble_mode") or "ensemble"),
+        "resnet_name": str(model_cfg.get("resnet_name") or "resnet18"),
+        "efficientnet_name": str(model_cfg.get("efficientnet_name") or "efficientnet_b0"),
+        "pretrained": bool(model_cfg.get("pretrained", False)),
+        "branch_mode": str(model_cfg.get("branch_mode") or "global_local"),
+        "local_branch_mode": str(local_branch_cfg.get("mode") or "patch_heatmap"),
+        "metadata_enabled": bool(metadata_cfg.get("enabled", True)),
         "input_modalities": _describe_input_modalities(config),
         "target_type": _describe_target(config),
-        "metadata_mode": str(config["model"]["metadata"].get("mode")),
+        "metadata_mode": str(metadata_cfg.get("mode") or "mlp"),
+        "heatmap_guidance": bool((model_cfg.get("heatmap_guidance") or {}).get("enabled", False)),
+        "cbam_enabled": bool(cbam_cfg.get("enabled", False)),
+        "cbam_global": bool(cbam_cfg.get("global_branch", False)),
+        "cbam_local": bool(cbam_cfg.get("local_branch", False)),
+        "horizontal_flip": bool(augmentation_cfg.get("horizontal_flip", False)),
+        "horizontal_flip_p": float(augmentation_cfg.get("horizontal_flip_p", 0.5) or 0.5),
+        "use_noise": bool(augmentation_cfg.get("use_noise", False)),
+        "noise_p": float(augmentation_cfg.get("noise_p", 0.0) or 0.0),
+        "use_blur": bool(augmentation_cfg.get("use_blur", False)),
+        "blur_p": float(augmentation_cfg.get("blur_p", 0.0) or 0.0),
         "normalization_mean": normalization_cfg.get("mean"),
         "normalization_std": normalization_cfg.get("std"),
         "normalization_source": normalization_cfg.get("resolved_source") or normalization_cfg.get("source"),
@@ -779,7 +933,7 @@ def _build_effective_params_payload(
 
 def _log_effective_params(logger, payload: dict[str, Any]) -> None:
     logger.info(
-        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s | warmup_epochs=%s | amp=%s | compile=%s(%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | input_size=%s | local_patch_size=%s | metadata_mode=%s | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
+        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | amp=%s | compile=%s(%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | ensemble=%s | branch=%s | local_mode=%s | metadata=%s(%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s] | input_size=%s | local_patch_size=%s | crop=%s(margin=%s) | sigma=(%s,%s) | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
         payload["experiment_mode"],
         payload["device"],
         payload["epochs"],
@@ -789,6 +943,8 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         _format_lr(payload["lr"]),
         payload["weight_decay"],
         payload["scheduler"],
+        _format_scalar(payload["scheduler_factor"], precision=3),
+        payload["scheduler_patience"],
         payload["warmup_epochs"],
         payload["amp"],
         payload["compile"],
@@ -801,9 +957,21 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         payload["persistent_workers"],
         payload["prefetch_factor"],
         payload["verify_images"],
+        payload["ensemble_mode"],
+        payload["branch_mode"],
+        payload["local_branch_mode"],
+        payload["metadata_enabled"],
+        payload["metadata_mode"],
+        payload["heatmap_guidance"],
+        payload["cbam_enabled"],
+        payload["cbam_global"],
+        payload["cbam_local"],
         payload["input_size"],
         payload["local_patch_size"],
-        payload["metadata_mode"],
+        payload["global_crop_mode"],
+        _format_scalar(payload["global_crop_margin_ratio"], precision=3),
+        _format_scalar(payload["heatmap_sigma_ratio"], precision=4),
+        _format_scalar(payload["heatmap_sigma_min"], precision=2),
         payload["target_type"],
         _format_scalar(payload["normalization_mean"], precision=8),
         _format_scalar(payload["normalization_std"], precision=8),
@@ -1073,13 +1241,15 @@ def _build_scheduler(optimizer, config: dict[str, Any]):
     training_cfg = config["training"]
     name = str(training_cfg["scheduler"]).lower()
     min_lr = float(training_cfg["min_lr"])
+    scheduler_factor = min(max(float(training_cfg.get("scheduler_factor", 0.5) or 0.5), 1e-4), 0.9999)
+    scheduler_patience = _resolve_non_negative_int(training_cfg.get("scheduler_patience"), default=2)
     warmup_epochs, _ = _resolve_warmup_settings(config, int(training_cfg["epochs"]))
     if name == "plateau":
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode="min",
-            factor=0.5,
-            patience=2,
+            factor=scheduler_factor,
+            patience=scheduler_patience,
             min_lr=min_lr,
         )
     if name == "cosine":
