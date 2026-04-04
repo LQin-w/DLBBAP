@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import glob
+import importlib
+import locale
 import os
+import platform
+import shutil
+import subprocess
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -11,10 +17,24 @@ import torch
 @dataclass
 class RuntimeInfo:
     python: str
+    python_executable: str
+    platform: str
+    is_wsl: bool
+    filesystem_encoding: str
+    preferred_encoding: str
+    stdout_encoding: str | None
+    stderr_encoding: str | None
     torch_version: str
     torchvision_version: str
+    torchaudio_version: str | None
+    numpy_version: str | None
+    pandas_version: str | None
     cuda_build: str | None
+    torch_cuda_built: bool
     cuda_available: bool
+    amp_available: bool
+    compile_available: bool
+    compile_triton_available: bool
     device_count: int
     device_names: list[str]
     requested_device: str
@@ -24,6 +44,11 @@ class RuntimeInfo:
     tf32_matmul: bool
     tf32_cudnn: bool
     float32_matmul_precision: str
+    nvidia_smi_available: bool
+    nvidia_smi_summary: str | None
+    nvidia_smi_gpu_names: list[str]
+    device_nodes: list[str]
+    cuda_diagnostic: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -40,12 +65,91 @@ def _normalize_requested_device(requested_device: str | None) -> str:
     return normalized
 
 
+def _module_version(name: str) -> str | None:
+    try:
+        module = importlib.import_module(name)
+    except Exception:
+        return None
+    return getattr(module, "__version__", None)
+
+
+def _is_wsl() -> bool:
+    return "microsoft" in platform.uname().release.lower()
+
+
+def _device_nodes() -> list[str]:
+    nodes = sorted(glob.glob("/dev/nvidia*"))
+    if os.path.exists("/dev/dxg"):
+        nodes.append("/dev/dxg")
+    return nodes
+
+
+def _probe_nvidia_smi() -> tuple[bool, str | None, list[str]]:
+    binary = shutil.which("nvidia-smi")
+    if binary is None:
+        return False, None, []
+
+    command = [
+        binary,
+        "--query-gpu=name,driver_version",
+        "--format=csv,noheader",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception as exc:
+        return False, f"nvidia-smi probe failed: {exc}", []
+
+    if result.returncode != 0:
+        raw_message = (result.stderr or result.stdout or "").strip() or f"returncode={result.returncode}"
+        message = " ".join(part for part in raw_message.splitlines() if part.strip())
+        return False, message, []
+
+    gpu_names: list[str] = []
+    driver_versions: list[str] = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "," in line:
+            name, driver = [part.strip() for part in line.split(",", 1)]
+            gpu_names.append(name)
+            driver_versions.append(driver)
+        else:
+            gpu_names.append(line)
+    driver_versions = [value for value in driver_versions if value]
+    summary_parts = []
+    if driver_versions:
+        summary_parts.append(f"driver={driver_versions[0]}")
+    if gpu_names:
+        summary_parts.append(f"gpus={gpu_names}")
+    summary = " | ".join(summary_parts) if summary_parts else "nvidia-smi reachable"
+    return True, summary, gpu_names
+
+
+def _cuda_diagnostic(cuda_available: bool, nvidia_smi_available: bool, device_nodes: list[str]) -> str | None:
+    if cuda_available:
+        return None
+    if nvidia_smi_available and not device_nodes:
+        return "nvidia-smi 可见，但当前会话缺少 /dev/dxg 或 /dev/nvidia* 设备节点，torch 无法直接访问 CUDA 设备。"
+    if nvidia_smi_available:
+        return "nvidia-smi 可见，但 torch 仍无法初始化 CUDA；请检查驱动映射、WSL/容器权限以及当前 Python 运行环境。"
+    return "当前会话未检测到可供 torch 使用的 NVIDIA 驱动或设备。"
+
+
 def detect_runtime(
     requested_device: str | None = None,
     allow_cpu_fallback: bool = False,
     deterministic: bool = False,
 ) -> tuple[torch.device, RuntimeInfo]:
     normalized_device = _normalize_requested_device(requested_device)
+    nvidia_smi_available, nvidia_smi_summary, nvidia_smi_gpu_names = _probe_nvidia_smi()
+    device_nodes = _device_nodes()
     cuda_available = torch.cuda.is_available()
     device_count = torch.cuda.device_count()
     names: list[str] = []
@@ -90,10 +194,24 @@ def detect_runtime(
 
     runtime = RuntimeInfo(
         python=sys.version.replace("\n", " "),
+        python_executable=sys.executable,
+        platform=platform.platform(),
+        is_wsl=_is_wsl(),
+        filesystem_encoding=sys.getfilesystemencoding(),
+        preferred_encoding=locale.getpreferredencoding(False),
+        stdout_encoding=getattr(sys.stdout, "encoding", None),
+        stderr_encoding=getattr(sys.stderr, "encoding", None),
         torch_version=torch.__version__,
-        torchvision_version=__import__("torchvision").__version__,
+        torchvision_version=_module_version("torchvision") or "unknown",
+        torchaudio_version=_module_version("torchaudio"),
+        numpy_version=_module_version("numpy"),
+        pandas_version=_module_version("pandas"),
         cuda_build=torch.version.cuda,
+        torch_cuda_built=torch.backends.cuda.is_built(),
         cuda_available=cuda_available,
+        amp_available=hasattr(torch, "amp"),
+        compile_available=hasattr(torch, "compile"),
+        compile_triton_available=_cuda_compile_is_available(),
         device_count=device_count,
         device_names=names,
         requested_device=normalized_device,
@@ -103,6 +221,11 @@ def detect_runtime(
         tf32_matmul=tf32_matmul,
         tf32_cudnn=tf32_cudnn,
         float32_matmul_precision=matmul_precision,
+        nvidia_smi_available=nvidia_smi_available,
+        nvidia_smi_summary=nvidia_smi_summary,
+        nvidia_smi_gpu_names=nvidia_smi_gpu_names,
+        device_nodes=device_nodes,
+        cuda_diagnostic=_cuda_diagnostic(cuda_available, nvidia_smi_available, device_nodes),
     )
     return device, runtime
 

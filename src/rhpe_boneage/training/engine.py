@@ -71,6 +71,16 @@ def _log_first_batch_device(
     setattr(logger, "_logged_first_batch_phases", logged_phases)
 
 
+def build_relative_age(
+    boneage: torch.Tensor,
+    chronological: torch.Tensor,
+    relative_direction: str = "boneage_minus_chronological",
+) -> torch.Tensor:
+    if relative_direction == "chronological_minus_boneage":
+        return chronological - boneage
+    return boneage - chronological
+
+
 def build_training_target(
     batch: dict[str, torch.Tensor],
     target_mode: str,
@@ -78,13 +88,31 @@ def build_training_target(
     relative_direction: str = "boneage_minus_chronological",
 ) -> torch.Tensor:
     if target_mode == "relative":
-        if relative_direction == "chronological_minus_boneage":
-            raw_target = batch["chronological"] - batch["boneage"]
-        else:
-            raw_target = batch["boneage"] - batch["chronological"]
+        raw_target = build_relative_age(
+            boneage=batch["boneage"],
+            chronological=batch["chronological"],
+            relative_direction=relative_direction,
+        )
     else:
         raw_target = batch["boneage"]
     return target_normalizer.transform_tensor(raw_target)
+
+
+def decode_relative_age_prediction(
+    prediction: torch.Tensor,
+    batch: dict[str, torch.Tensor],
+    target_mode: str,
+    target_normalizer,
+    relative_direction: str = "boneage_minus_chronological",
+) -> torch.Tensor:
+    if target_mode == "relative":
+        return target_normalizer.inverse_transform_tensor(prediction)
+    final_boneage = target_normalizer.inverse_transform_tensor(prediction)
+    return build_relative_age(
+        boneage=final_boneage,
+        chronological=batch["chronological"],
+        relative_direction=relative_direction,
+    )
 
 
 def decode_boneage_prediction(
@@ -121,7 +149,7 @@ def _set_progress_postfix(progress, total_loss: float, total_count: int) -> None
     if running_loss is not None:
         progress.set_postfix(loss=f"{running_loss:.4f}")
     else:
-        progress.set_postfix(loss="nan")
+        progress.set_postfix(loss="n/a")
 
 
 def _log_first_batch_wait(logger, phase: str, epoch: int | None, seconds: float) -> None:
@@ -143,7 +171,9 @@ def _format_seconds(seconds: float | None) -> str:
 
 
 def _format_loss_value(value: float | None) -> str:
-    if value is None or math.isnan(value):
+    if value is None:
+        return "n/a"
+    if math.isnan(value):
         return "nan"
     return f"{value:.4f}"
 
@@ -224,8 +254,10 @@ def run_epoch(
     grad_accum_steps = max(1, int(grad_accum_steps))
     total_loss = 0.0
     total_count = 0
-    y_true: list[float] = []
-    y_pred: list[float] = []
+    final_boneage_true: list[float] = []
+    final_boneage_pred: list[float] = []
+    relative_age_true: list[float] = []
+    relative_age_pred: list[float] = []
     rows: list[dict[str, Any]] | None = [] if collect_predictions else None
 
     scope_label = _resolve_scope_label(epoch, total_epochs, progress_label)
@@ -356,11 +388,23 @@ def run_epoch(
                             optimizer.zero_grad(set_to_none=True)
                             optimizer_steps += 1
 
-                pred_boneage = decode_boneage_prediction(
+                predicted_relative_age = decode_relative_age_prediction(
                     prediction,
                     batch,
                     target_mode,
                     target_normalizer,
+                    relative_direction=relative_direction,
+                )
+                final_boneage = decode_boneage_prediction(
+                    prediction,
+                    batch,
+                    target_mode,
+                    target_normalizer,
+                    relative_direction=relative_direction,
+                )
+                relative_age = build_relative_age(
+                    boneage=batch["boneage"],
+                    chronological=batch["chronological"],
                     relative_direction=relative_direction,
                 )
 
@@ -372,40 +416,42 @@ def run_epoch(
                     total_count += valid_count
 
                 if has_target_mask.any():
-                    y_true.extend(batch["boneage"][has_target_mask].detach().view(-1).cpu().tolist())
-                    y_pred.extend(pred_boneage[has_target_mask].detach().view(-1).cpu().tolist())
+                    final_boneage_true.extend(batch["boneage"][has_target_mask].detach().view(-1).cpu().tolist())
+                    final_boneage_pred.extend(final_boneage[has_target_mask].detach().view(-1).cpu().tolist())
+                    relative_age_true.extend(relative_age[has_target_mask].detach().view(-1).cpu().tolist())
+                    relative_age_pred.extend(predicted_relative_age[has_target_mask].detach().view(-1).cpu().tolist())
 
                 if collect_predictions:
                     has_target_cpu = batch["has_target"].detach().view(-1).cpu().numpy().astype(bool)
                     boneage_cpu = batch["boneage"].detach().view(-1).cpu().numpy()
-                    pred_boneage_cpu = pred_boneage.detach().view(-1).cpu().numpy()
+                    final_boneage_cpu = final_boneage.detach().view(-1).cpu().numpy()
                     chronological_cpu = batch["chronological"].detach().view(-1).cpu().numpy()
                     male_index_cpu = batch["male_index"].detach().view(-1).cpu().numpy()
+                    relative_age_cpu = relative_age.detach().view(-1).cpu().numpy()
+                    predicted_relative_age_cpu = predicted_relative_age.detach().view(-1).cpu().numpy()
 
                     for index in range(batch_size):
                         gt_value = float(boneage_cpu[index]) if has_target_cpu[index] else np.nan
-                        pred_value = float(pred_boneage_cpu[index])
+                        pred_value = float(final_boneage_cpu[index])
                         abs_error = abs(pred_value - gt_value) if not np.isnan(gt_value) else np.nan
-                        if not np.isnan(gt_value):
-                            chronological_value = float(chronological_cpu[index])
-                            if relative_direction == "chronological_minus_boneage":
-                                relative_gt = chronological_value - gt_value
-                                relative_pred = chronological_value - pred_value
-                            else:
-                                relative_gt = gt_value - chronological_value
-                                relative_pred = pred_value - chronological_value
-                        else:
-                            chronological_value = float(chronological_cpu[index])
-                            relative_gt = np.nan
-                            relative_pred = np.nan
+                        chronological_value = float(chronological_cpu[index])
+                        relative_gt = float(relative_age_cpu[index]) if has_target_cpu[index] else np.nan
+                        relative_pred = float(predicted_relative_age_cpu[index])
                         rows.append(
                             {
                                 "ID": batch["id"][index],
+                                "gt_final_boneage": gt_value,
+                                "pred_final_boneage": pred_value,
+                                "final_abs_error": abs_error,
+                                "gt_relative_age": relative_gt,
+                                "pred_relative_age": relative_pred,
                                 "gt_boneage": gt_value,
                                 "pred_boneage": pred_value,
                                 "abs_error": abs_error,
                                 "sex": int(male_index_cpu[index]),
                                 "chronological": chronological_value,
+                                "final_boneage": pred_value,
+                                "predicted_relative_age": relative_pred,
                                 "gt_relative_boneage": relative_gt,
                                 "pred_relative_boneage": relative_pred,
                             }
@@ -426,7 +472,7 @@ def run_epoch(
                     eta_seconds = 0.0
                     if batch_number < total_batches and batch_number > 0:
                         eta_seconds = (phase_elapsed / batch_number) * (total_batches - batch_number)
-                    current_loss = float(loss.detach().item()) if loss is not None else math.nan
+                    current_loss = float(loss.detach().item()) if loss is not None else None
                     current_lr = lr_override if lr_override is not None else (optimizer.param_groups[0]["lr"] if optimizer is not None else None)
                     memory_stats = _cuda_memory_stats(device)
                     samples_per_second = batch_size / max(batch_time, 1e-8)
@@ -464,8 +510,17 @@ def run_epoch(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     phase_total_time = time.perf_counter() - phase_started
-    metrics = compute_regression_metrics(y_true, y_pred)
-    metrics["loss"] = total_loss / max(total_count, 1) if total_count > 0 else None
+    final_metrics = compute_regression_metrics(final_boneage_true, final_boneage_pred)
+    relative_metrics = compute_regression_metrics(relative_age_true, relative_age_pred)
+    metrics = {
+        "loss": total_loss / max(total_count, 1) if total_count > 0 else None,
+        "final_mae": final_metrics.get("mae"),
+        "final_mad": final_metrics.get("mad"),
+        "relative_mae": relative_metrics.get("mae"),
+        "relative_mad": relative_metrics.get("mad"),
+        "mae": final_metrics.get("mae"),
+        "mad": final_metrics.get("mad"),
+    }
     batch_count = max(total_batches, 0)
     memory_stats = _cuda_memory_stats(device)
     phase_stats = {
@@ -490,11 +545,13 @@ def run_epoch(
         metrics["relative_age_error_slope"] = None
         if logger is not None:
             logger.info(
-                "Phase finished | scope=%s | loss=%s | mae=%s | mad=%s | phase_time=%s | data_time=%s | transfer_time=%s | compute_time=%s | samples_per_sec=%.2f | avg_batch_time=%s | min_batch_time=%s | max_batch_time=%s | gpu_peak_alloc=%s | gpu_peak_reserved=%s | optimizer_steps=%d",
+                "Phase finished | scope=%s | loss=%s | final_mae=%s | final_mad=%s | relative_mae=%s | relative_mad=%s | phase_time=%s | data_time=%s | transfer_time=%s | compute_time=%s | samples_per_sec=%.2f | avg_batch_time=%s | min_batch_time=%s | max_batch_time=%s | gpu_peak_alloc=%s | gpu_peak_reserved=%s | optimizer_steps=%d",
                 scope_label,
                 _format_loss_value(metrics.get("loss")),
-                _format_loss_value(metrics.get("mae")),
-                _format_loss_value(metrics.get("mad")),
+                _format_loss_value(metrics.get("final_mae")),
+                _format_loss_value(metrics.get("final_mad")),
+                _format_loss_value(metrics.get("relative_mae")),
+                _format_loss_value(metrics.get("relative_mad")),
                 _format_seconds(phase_total_time),
                 _format_seconds(total_data_wait),
                 _format_seconds(total_transfer_time),
@@ -513,7 +570,7 @@ def run_epoch(
     prediction_df = pd.DataFrame(rows)
     valid_df = prediction_df[prediction_df["gt_boneage"].notna()].copy()
     if len(valid_df) >= 2:
-        relative_values = valid_df["gt_relative_boneage"].to_numpy(dtype=np.float32)
+        relative_values = valid_df["gt_relative_age"].to_numpy(dtype=np.float32)
         abs_errors = valid_df["abs_error"].to_numpy(dtype=np.float32)
         if (
             np.std(relative_values) < 1e-8
@@ -532,11 +589,13 @@ def run_epoch(
         metrics["relative_age_error_slope"] = None
     if logger is not None:
         logger.info(
-            "Phase finished | scope=%s | loss=%s | mae=%s | mad=%s | phase_time=%s | data_time=%s | transfer_time=%s | compute_time=%s | samples_per_sec=%.2f | avg_batch_time=%s | min_batch_time=%s | max_batch_time=%s | gpu_peak_alloc=%s | gpu_peak_reserved=%s | optimizer_steps=%d",
+            "Phase finished | scope=%s | loss=%s | final_mae=%s | final_mad=%s | relative_mae=%s | relative_mad=%s | phase_time=%s | data_time=%s | transfer_time=%s | compute_time=%s | samples_per_sec=%.2f | avg_batch_time=%s | min_batch_time=%s | max_batch_time=%s | gpu_peak_alloc=%s | gpu_peak_reserved=%s | optimizer_steps=%d",
             scope_label,
             _format_loss_value(metrics.get("loss")),
-            _format_loss_value(metrics.get("mae")),
-            _format_loss_value(metrics.get("mad")),
+            _format_loss_value(metrics.get("final_mae")),
+            _format_loss_value(metrics.get("final_mad")),
+            _format_loss_value(metrics.get("relative_mae")),
+            _format_loss_value(metrics.get("relative_mad")),
             _format_seconds(phase_total_time),
             _format_seconds(total_data_wait),
             _format_seconds(total_transfer_time),

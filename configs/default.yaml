@@ -1,5 +1,6 @@
 experiment:
   name: rhpe_boneage_multimodal
+  mode: enhanced
   output_root: outputs
   seed: 2026
 
@@ -18,6 +19,11 @@ data:
   global_crop_mode: bbox
   global_crop_margin_ratio: 0.08
   verify_images: false
+  normalization:
+    source: auto_train_stats
+    stats_path: train_mean_std.json
+    mean: null
+    std: null
 
 model:
   ensemble_mode: ensemble

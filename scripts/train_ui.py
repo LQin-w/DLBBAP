@@ -26,8 +26,10 @@ except ModuleNotFoundError:
 
 
 PRESET_OPTIONS: dict[str, list[str]] = {
+    "experiment.mode": ["enhanced", "simba", "bonet_like"],
     "runtime.device": ["cuda:0", "cuda:1", "cpu"],
     "data.global_crop_mode": ["bbox", "full"],
+    "data.normalization.source": ["auto_train_stats", "manual"],
     "model.ensemble_mode": ["ensemble", "resnet", "efficientnet"],
     "model.resnet_name": ["resnet18", "resnet34", "resnet50"],
     "model.efficientnet_name": ["efficientnet_b0", "efficientnet_b1", "efficientnet_b2"],
@@ -45,7 +47,9 @@ PRESET_OPTIONS: dict[str, list[str]] = {
 }
 
 STRICT_OPTIONS: dict[str, set[str]] = {
+    "experiment.mode": {"enhanced", "simba", "bonet_like"},
     "data.global_crop_mode": {"bbox", "full", "none", "image"},
+    "data.normalization.source": {"auto_train_stats", "manual"},
     "model.ensemble_mode": {"ensemble", "resnet", "efficientnet"},
     "model.resnet_name": {"resnet18", "resnet34", "resnet50"},
     "model.efficientnet_name": {"efficientnet_b0", "efficientnet_b1", "efficientnet_b2"},

@@ -123,10 +123,26 @@ def _compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float | None:
 def _build_metric_text(metrics: dict[str, Any] | None, r2: float | None = None) -> str:
     lines: list[str] = []
     if metrics is not None:
-        for key, label in (("loss", "Loss"), ("mae", "MAE"), ("mad", "MAD")):
+        metric_items = [
+            ("loss", "Loss"),
+            ("final_mae", "Final MAE"),
+            ("final_mad", "Final MAD"),
+            ("relative_mae", "Relative MAE"),
+            ("relative_mad", "Relative MAD"),
+        ]
+        fallback_items = [
+            ("mae", "MAE"),
+            ("mad", "MAD"),
+        ]
+        for key, label in metric_items:
             value = _safe_float(metrics.get(key))
             if value is not None:
                 lines.append(f"{label} = {value:.4f}")
+        if not any(item.startswith("Final MAE") for item in lines):
+            for key, label in fallback_items:
+                value = _safe_float(metrics.get(key))
+                if value is not None:
+                    lines.append(f"{label} = {value:.4f}")
     if r2 is not None:
         lines.append(f"R^2 = {r2:.4f}")
     return "\n".join(lines)
@@ -426,6 +442,7 @@ def generate_training_report(
     last_checkpoint_path: str | Path,
 ) -> dict[str, Any]:
     report_dir = _prepare_output_dir(output_dir)
+    plots_dir = _prepare_output_dir(report_dir / "plots")
     history_df = _validate_history_df(history_df)
     metric_column = f"val_{best_metric_name}"
     if metric_column not in history_df.columns:
@@ -444,14 +461,14 @@ def generate_training_report(
     )
     metrics_summary_df.to_csv(report_dir / "metrics_summary.csv", index=False)
 
-    plot_history(history_df, report_dir / "curves.png")
-    _plot_metric_curve(history_df, "train_loss", "val_loss", report_dir / "loss_curve.png", "Loss Curve", "Loss")
-    _plot_metric_curve(history_df, "train_mae", "val_mae", report_dir / "mae_curve.png", "MAE Curve", "MAE")
-    _plot_metric_curve(history_df, "train_mad", "val_mad", report_dir / "mad_curve.png", "MAD Curve", "MAD")
+    plot_history(history_df, plots_dir / "curves.png")
+    _plot_metric_curve(history_df, "train_loss", "val_loss", plots_dir / "loss_curve.png", "Loss Curve", "Loss")
+    _plot_metric_curve(history_df, "train_mae", "val_mae", plots_dir / "mae_curve.png", "MAE Curve", "MAE")
+    _plot_metric_curve(history_df, "train_mad", "val_mad", plots_dir / "mad_curve.png", "MAD Curve", "MAD")
 
-    val_scatter_stats = plot_scatter(val_predictions, report_dir / "val_scatter.png", "Validation", metrics=val_metrics)
-    plot_residual(val_predictions, report_dir / "val_residual.png", "Validation", metrics=val_metrics)
-    plot_error_histogram(val_predictions, report_dir / "error_histogram_val.png", "Validation", metrics=val_metrics)
+    val_scatter_stats = plot_scatter(val_predictions, plots_dir / "val_scatter.png", "Validation", metrics=val_metrics)
+    plot_residual(val_predictions, plots_dir / "val_residual.png", "Validation", metrics=val_metrics)
+    plot_error_histogram(val_predictions, plots_dir / "error_histogram_val.png", "Validation", metrics=val_metrics)
 
     test_scatter_stats = None
     test_note = None
@@ -460,19 +477,19 @@ def generate_training_report(
         if "gt_boneage" in test_predictions.columns:
             has_test_targets = bool(test_predictions["gt_boneage"].notna().any())
         if has_test_targets:
-            test_scatter_stats = plot_scatter(test_predictions, report_dir / "test_scatter.png", "Test", metrics=test_metrics)
-            plot_residual(test_predictions, report_dir / "test_residual.png", "Test", metrics=test_metrics)
-            plot_error_histogram(test_predictions, report_dir / "error_histogram_test.png", "Test", metrics=test_metrics)
+            test_scatter_stats = plot_scatter(test_predictions, plots_dir / "test_scatter.png", "Test", metrics=test_metrics)
+            plot_residual(test_predictions, plots_dir / "test_residual.png", "Test", metrics=test_metrics)
+            plot_error_histogram(test_predictions, plots_dir / "error_histogram_test.png", "Test", metrics=test_metrics)
         else:
             test_scatter_stats = plot_prediction_histogram(
                 test_predictions,
-                report_dir / "test_prediction_histogram.png",
+                plots_dir / "test_prediction_histogram.png",
                 "Test",
             )
             test_note = (
                 "当前 test 集缺少 Boneage 真值列，因此无法计算 test loss/MAE/MAD，"
-                "也无法生成 test_scatter.png、test_residual.png 和 error_histogram_test.png。"
-                "系统已自动改为输出 test_prediction_histogram.png 与 test_prediction_summary.json。"
+                "也无法生成 plots/test_scatter.png、plots/test_residual.png 和 plots/error_histogram_test.png。"
+                "系统已自动改为输出 plots/test_prediction_histogram.png 与 test_prediction_summary.json。"
             )
             _write_text(test_note, report_dir / "test_report_note.txt")
             _write_json(
@@ -497,9 +514,17 @@ def generate_training_report(
         "best_val_loss": _safe_float(val_metrics.get("loss")),
         "best_val_mae": _safe_float(val_metrics.get("mae")),
         "best_val_mad": _safe_float(val_metrics.get("mad")),
+        "best_val_final_mae": _safe_float(val_metrics.get("final_mae")),
+        "best_val_final_mad": _safe_float(val_metrics.get("final_mad")),
+        "best_val_relative_mae": _safe_float(val_metrics.get("relative_mae")),
+        "best_val_relative_mad": _safe_float(val_metrics.get("relative_mad")),
         "test_loss": _safe_float(test_metrics.get("loss")) if test_metrics else None,
         "test_mae": _safe_float(test_metrics.get("mae")) if test_metrics else None,
         "test_mad": _safe_float(test_metrics.get("mad")) if test_metrics else None,
+        "test_final_mae": _safe_float(test_metrics.get("final_mae")) if test_metrics else None,
+        "test_final_mad": _safe_float(test_metrics.get("final_mad")) if test_metrics else None,
+        "test_relative_mae": _safe_float(test_metrics.get("relative_mae")) if test_metrics else None,
+        "test_relative_mad": _safe_float(test_metrics.get("relative_mad")) if test_metrics else None,
         "val_relative_age_error_corr": _safe_float(val_metrics.get("relative_age_error_corr")),
         "val_relative_age_error_slope": _safe_float(val_metrics.get("relative_age_error_slope")),
         "test_relative_age_error_corr": _safe_float(test_metrics.get("relative_age_error_corr")) if test_metrics else None,
@@ -515,4 +540,5 @@ def generate_training_report(
         },
     }
     _write_json(best_metrics_payload, report_dir / "best_metrics.json")
+    _write_json(best_metrics_payload, report_dir / "metrics.json")
     return best_metrics_payload

@@ -69,13 +69,15 @@ def _read_roi_json(json_path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def _index_roi_annotations(json_path: Path, id_width: int) -> dict[str, dict[str, Any]]:
+def _index_roi_annotations(json_path: Path, id_width: int) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
     data = _read_roi_json(json_path)
     image_meta = {entry["id"]: entry for entry in data["images"]}
     roi_map: dict[str, dict[str, Any]] = {}
+    roi_counts = Counter()
     for ann in data["annotations"]:
         meta = image_meta[ann["image_id"]]
         file_id = _normalize_id(Path(meta["file_name"]).stem, id_width)
+        roi_counts[file_id] += 1
         keypoints = ann.get("keypoints", [])
         if keypoints:
             keypoints = [
@@ -91,7 +93,8 @@ def _index_roi_annotations(json_path: Path, id_width: int) -> dict[str, dict[str
             "image_id": int(meta["id"]),
             "file_name": meta["file_name"],
         }
-    return roi_map
+    duplicate_map = {key: count for key, count in roi_counts.items() if count > 1}
+    return roi_map, duplicate_map
 
 
 def _check_image_readable(path: Path) -> str | None:
@@ -163,8 +166,7 @@ def build_split_records(
         image_files[stem] = path
     image_duplicates = {key: count for key, count in image_duplicates.items() if count > 1}
 
-    roi_map = _index_roi_annotations(roi_json_path, id_width)
-    roi_duplicates = {}
+    roi_map, roi_duplicates = _index_roi_annotations(roi_json_path, id_width)
 
     csv_map = {row["ID"]: row for row in rows}
     all_ids = sorted(set(csv_map) | set(image_files) | set(roi_map))
@@ -235,6 +237,9 @@ def build_split_records(
         "matched_records": len(records),
         "issues": issues,
     }
+    if roi_duplicates:
+        duplicate_text = ", ".join(f"{sample_id}x{count}" for sample_id, count in sorted(roi_duplicates.items()))
+        raise ValueError(f"ROI JSON 存在重复样本标注: split={split} | {duplicate_text}")
     sources = SplitSources(
         split=split,
         image_dir=str(image_dir),

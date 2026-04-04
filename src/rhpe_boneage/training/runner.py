@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,14 @@ import torch
 from torch.utils.data import DataLoader
 
 from ..config import load_config, save_config
-from ..data import RHPEBoneAgeDataset, build_dataset_index, build_manual_split_records
+from ..data import (
+    RHPEBoneAgeDataset,
+    build_dataset_index,
+    build_manual_split_records,
+    compute_grayscale_mean_std,
+    load_mean_std_cache,
+    save_mean_std_cache,
+)
 from ..data.dataset import DatasetStats
 from ..data.transforms import build_geometric_transform, build_image_intensity_transform
 from ..models import build_model
@@ -42,7 +50,7 @@ def _format_seconds(seconds: float | None) -> str:
 
 def _format_scalar(value: Any, precision: int = 4) -> str:
     if value is None:
-        return "nan"
+        return "n/a"
     try:
         if math.isnan(float(value)):
             return "nan"
@@ -180,6 +188,205 @@ def _describe_loss(config: dict[str, Any]) -> str:
     return loss_name
 
 
+def _resolve_experiment_mode(config: dict[str, Any]) -> str:
+    experiment_cfg = config.setdefault("experiment", {})
+    mode = str(experiment_cfg.get("mode") or "enhanced").strip().lower()
+    allowed = {"enhanced", "simba", "bonet_like"}
+    if mode not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise ValueError(f"experiment.mode 仅支持: {allowed_text}")
+    experiment_cfg["mode"] = mode
+    return mode
+
+
+def _mode_profile(mode: str) -> dict[str, str]:
+    profiles = {
+        "enhanced": {
+            "label": "enhanced (default)",
+            "simba": "partial",
+            "bonet": "partial",
+            "description": "Engineering-enhanced multimodal framework.",
+        },
+        "simba": {
+            "label": "simba",
+            "simba": "partial (emphasized)",
+            "bonet": "partial (supporting)",
+            "description": "SIMBA-oriented declaration mode within the current engineering framework.",
+        },
+        "bonet_like": {
+            "label": "bonet_like",
+            "simba": "partial (supporting)",
+            "bonet": "partial (emphasized)",
+            "description": "BoNet-oriented declaration mode within the current engineering framework.",
+        },
+    }
+    return profiles[mode]
+
+
+def _log_running_mode(logger, config: dict[str, Any]) -> str:
+    mode = _resolve_experiment_mode(config)
+    profile = _mode_profile(mode)
+    logger.info("Running mode: %s", profile["label"], extra=_phase_extra("SYSTEM"))
+    logger.info("- SIMBA: %s", profile["simba"], extra=_phase_extra("SYSTEM"))
+    logger.info("- BoNet: %s", profile["bonet"], extra=_phase_extra("SYSTEM"))
+    logger.info("Mode note: %s", profile["description"], extra=_phase_extra("SYSTEM"))
+
+    metadata_mode = str((config.get("model") or {}).get("metadata", {}).get("mode") or "mlp").lower()
+    target_mode = str((config.get("model") or {}).get("target_mode") or "relative").lower()
+    branch_mode = str((config.get("model") or {}).get("branch_mode") or "global_local").lower()
+    if mode == "simba":
+        if target_mode != "relative":
+            logger.warning("experiment.mode=simba 但 model.target_mode=%s；这与 SIMBA 风格相对骨龄设定不一致。", target_mode)
+        if metadata_mode == "mlp":
+            logger.warning("experiment.mode=simba 但 model.metadata.mode=mlp；若要更贴近 SIMBA，请改为 simba_multiplier 或 simba_hybrid。")
+    if mode == "bonet_like" and branch_mode == "global_only":
+        logger.warning("experiment.mode=bonet_like 但 model.branch_mode=global_only；局部分支未启用，无法体现 ROI/keypoints/local patches。")
+    return mode
+
+
+def _resolve_normalization_cache_path(
+    config: dict[str, Any],
+    payload: dict[str, Any],
+    train_image_dir: str | Path,
+) -> Path:
+    normalization_cfg = (config.get("data") or {}).setdefault("normalization", {})
+    raw_path = normalization_cfg.get("stats_path") or "train_mean_std.json"
+    cache_path = Path(raw_path)
+    if cache_path.is_absolute():
+        return cache_path
+    dataset_root = payload.get("dataset_root")
+    if dataset_root:
+        return Path(dataset_root) / cache_path
+    return Path(train_image_dir).resolve().parent / cache_path
+
+
+def _resolve_image_normalization(
+    config: dict[str, Any],
+    payload: dict[str, Any],
+    checkpoint_state: dict[str, Any] | None,
+    run_dir: Path,
+    logger,
+) -> dict[str, Any]:
+    data_cfg = config.setdefault("data", {})
+    normalization_cfg = data_cfg.setdefault("normalization", {})
+    normalization_source = str(normalization_cfg.get("source") or "auto_train_stats").lower()
+    if normalization_source not in {"auto_train_stats", "manual"}:
+        raise ValueError("data.normalization.source 仅支持 auto_train_stats 或 manual")
+
+    checkpoint_config = (checkpoint_state or {}).get("config") or {}
+    checkpoint_normalization = ((checkpoint_config.get("data") or {}).get("normalization") or {})
+    checkpoint_snapshot = (checkpoint_state or {}).get("image_normalization") or {}
+
+    resolved_source = normalization_source
+    mean = checkpoint_normalization.get("mean")
+    std = checkpoint_normalization.get("std")
+    if mean is None or std is None:
+        mean = checkpoint_snapshot.get("mean")
+        std = checkpoint_snapshot.get("std")
+    if mean is not None and std is not None:
+        resolved_source = "checkpoint"
+    else:
+        mean = normalization_cfg.get("mean")
+        std = normalization_cfg.get("std")
+
+    train_sources = ((payload.get("splits") or {}).get("train") or {}).get("sources") or {}
+    train_image_dir = train_sources.get("image_dir")
+    cache_path = _resolve_normalization_cache_path(config, payload, train_image_dir or data_cfg.get("dataset_root", "dataset"))
+    stats_payload = None
+
+    if mean is None or std is None:
+        if normalization_source == "manual":
+            raise ValueError("data.normalization.source=manual 时必须同时提供 data.normalization.mean 和 data.normalization.std")
+        cached = load_mean_std_cache(cache_path) if cache_path.exists() else None
+        current_train_dir = str(Path(train_image_dir).resolve()) if train_image_dir else None
+        if cached is not None and (current_train_dir is None or cached.get("image_dir") == current_train_dir):
+            stats_payload = cached
+            resolved_source = "auto_train_stats(cache)"
+        else:
+            if not train_image_dir:
+                raise ValueError("自动统计 mean/std 需要 train split 图像目录，但当前 payload 中未找到。")
+            logger.info("正在统计 train 集灰度图 mean/std | image_dir=%s", train_image_dir, extra=_phase_extra("SYSTEM"))
+            stats_payload = compute_grayscale_mean_std(train_image_dir)
+            save_mean_std_cache(stats_payload, cache_path)
+            resolved_source = "auto_train_stats(computed)"
+        mean = stats_payload["mean"]
+        std = stats_payload["std"]
+    else:
+        mean = float(mean)
+        std = float(std)
+        resolved_source = "manual" if normalization_source == "manual" else resolved_source
+        stats_payload = {
+            "image_dir": str(Path(train_image_dir).resolve()) if train_image_dir else None,
+            "mean": mean,
+            "std": std,
+            "mean_255": mean * 255.0,
+            "std_255": std * 255.0,
+            "source": resolved_source,
+        }
+
+    if std <= 0:
+        raise ValueError(f"图像归一化标准差必须大于 0，当前为 {std}")
+
+    normalization_cfg["mean"] = float(mean)
+    normalization_cfg["std"] = float(std)
+    normalization_cfg["resolved_source"] = resolved_source
+    normalization_cfg["stats_path"] = str(cache_path)
+
+    stats_payload = dict(stats_payload or {})
+    stats_payload["source"] = resolved_source
+    stats_payload["stats_path"] = str(cache_path)
+    write_json(stats_payload, run_dir / "image_normalization.json")
+    logger.info(
+        "Image normalization | source=%s | mean=%.8f | std=%.8f | cache=%s",
+        resolved_source,
+        float(mean),
+        float(std),
+        cache_path,
+        extra=_phase_extra("SYSTEM"),
+    )
+    return stats_payload
+
+
+def _describe_target(config: dict[str, Any]) -> str:
+    model_cfg = config.get("model") or {}
+    target_mode = str(model_cfg.get("target_mode") or "relative").lower()
+    if target_mode == "relative":
+        direction = str(model_cfg.get("relative_target_direction") or "boneage_minus_chronological")
+        if direction == "chronological_minus_boneage":
+            return "relative_age = Chronological - Boneage -> final_boneage = Chronological - predicted_relative_age"
+        return "relative_age = Boneage - Chronological -> final_boneage = Chronological + predicted_relative_age"
+    return "direct boneage regression"
+
+
+def _describe_input_modalities(config: dict[str, Any]) -> list[str]:
+    model_cfg = config.get("model") or {}
+    branch_mode = str(model_cfg.get("branch_mode") or "global_local").lower()
+    metadata_enabled = bool((model_cfg.get("metadata") or {}).get("enabled", True))
+    modalities = ["grayscale_global_image"]
+    if bool((model_cfg.get("heatmap_guidance") or {}).get("enabled", False)):
+        modalities.append("global_roi_heatmap")
+    if branch_mode in {"global_local", "local_only"}:
+        local_mode = str(((model_cfg.get("local_branch") or {}).get("mode") or "patch_heatmap")).lower()
+        if local_mode in {"patch", "patch_heatmap"}:
+            modalities.append("local_patches")
+        if local_mode in {"heatmap", "patch_heatmap"}:
+            modalities.append("local_heatmaps")
+        modalities.append("roi_geometry_vector")
+    if metadata_enabled:
+        modalities.extend(["male", "chronological"])
+    return modalities
+
+
+def _describe_model_type(config: dict[str, Any]) -> str:
+    model_cfg = config.get("model") or {}
+    ensemble_mode = str(model_cfg.get("ensemble_mode") or "ensemble").lower()
+    if ensemble_mode == "ensemble":
+        return f"EnsembleBoneAgeModel({model_cfg.get('resnet_name')} + {model_cfg.get('efficientnet_name')})"
+    if ensemble_mode == "resnet":
+        return f"SingleBackboneModel({model_cfg.get('resnet_name')})"
+    return f"SingleBackboneModel({model_cfg.get('efficientnet_name')})"
+
+
 def _log_epoch_header(
     logger,
     config: dict[str, Any],
@@ -294,27 +501,31 @@ def _log_epoch_metrics(
 ) -> None:
     if not eval_ran or val_metrics is None:
         logger.info(
-            "Epoch %d/%d metrics | train_loss=%s | train_mae=%s | train_mad=%s | lr_start=%s | lr_end=%s | validation=skipped",
+            "Epoch %d/%d metrics | train_loss=%s | train_final_mae=%s | train_relative_mae=%s | train_final_mad=%s | train_relative_mad=%s | lr_start=%s | lr_end=%s | validation=skipped",
             epoch,
             total_epochs,
-            _format_scalar(_safe_metric_value(train_metrics.get("loss"))),
-            _format_scalar(_safe_metric_value(train_metrics.get("mae"))),
-            _format_scalar(_safe_metric_value(train_metrics.get("mad"))),
+            _format_scalar(train_metrics.get("loss")),
+            _format_scalar(train_metrics.get("final_mae")),
+            _format_scalar(train_metrics.get("relative_mae")),
+            _format_scalar(train_metrics.get("final_mad")),
+            _format_scalar(train_metrics.get("relative_mad")),
             _format_lr(lr_start),
             _format_lr(lr_end),
             extra=_phase_extra("SYSTEM"),
         )
         return
     logger.info(
-        "Epoch %d/%d metrics | train_loss=%s | val_loss=%s | train_mae=%s | val_mae=%s | train_mad=%s | val_mad=%s | lr_start=%s | lr_end=%s",
+        "Epoch %d/%d metrics | train_loss=%s | val_loss=%s | train_final_mae=%s | val_final_mae=%s | train_relative_mae=%s | val_relative_mae=%s | train_final_mad=%s | val_final_mad=%s | lr_start=%s | lr_end=%s",
         epoch,
         total_epochs,
-        _format_scalar(_safe_metric_value(train_metrics.get("loss"))),
-        _format_scalar(_safe_metric_value(val_metrics.get("loss"))),
-        _format_scalar(_safe_metric_value(train_metrics.get("mae"))),
-        _format_scalar(_safe_metric_value(val_metrics.get("mae"))),
-        _format_scalar(_safe_metric_value(train_metrics.get("mad"))),
-        _format_scalar(_safe_metric_value(val_metrics.get("mad"))),
+        _format_scalar(train_metrics.get("loss")),
+        _format_scalar(val_metrics.get("loss")),
+        _format_scalar(train_metrics.get("final_mae")),
+        _format_scalar(val_metrics.get("final_mae")),
+        _format_scalar(train_metrics.get("relative_mae")),
+        _format_scalar(val_metrics.get("relative_mae")),
+        _format_scalar(train_metrics.get("final_mad")),
+        _format_scalar(val_metrics.get("final_mad")),
         _format_lr(lr_start),
         _format_lr(lr_end),
         extra=_phase_extra("SYSTEM"),
@@ -331,6 +542,179 @@ def _log_dataloader_kwargs(logger, loader_kwargs: dict[str, Any]) -> None:
     )
 
 
+def _log_runtime_info(logger, runtime) -> None:
+    logger.info(
+        "运行环境 | python=%s | executable=%s | platform=%s | is_wsl=%s | filesystem_encoding=%s | preferred_encoding=%s | stdout_encoding=%s",
+        runtime.python,
+        runtime.python_executable,
+        runtime.platform,
+        runtime.is_wsl,
+        runtime.filesystem_encoding,
+        runtime.preferred_encoding,
+        runtime.stdout_encoding,
+        extra=_phase_extra("SYSTEM"),
+    )
+    logger.info(
+        "依赖版本 | torch=%s | torchvision=%s | torchaudio=%s | numpy=%s | pandas=%s | cuda_build=%s | torch_cuda_built=%s | amp_available=%s | compile_available=%s | triton_available=%s",
+        runtime.torch_version,
+        runtime.torchvision_version,
+        runtime.torchaudio_version,
+        runtime.numpy_version,
+        runtime.pandas_version,
+        runtime.cuda_build,
+        runtime.torch_cuda_built,
+        runtime.amp_available,
+        runtime.compile_available,
+        runtime.compile_triton_available,
+        extra=_phase_extra("SYSTEM"),
+    )
+    logger.info(
+        "设备环境 | requested_device=%s | selected_device=%s | cuda_available=%s | device_count=%s | gpus=%s | nvidia_smi=%s | device_nodes=%s | deterministic=%s | cudnn_benchmark=%s | tf32_matmul=%s | tf32_cudnn=%s | matmul_precision=%s",
+        runtime.requested_device,
+        runtime.selected_device,
+        runtime.cuda_available,
+        runtime.device_count,
+        runtime.device_names,
+        runtime.nvidia_smi_summary,
+        runtime.device_nodes,
+        runtime.deterministic,
+        runtime.cudnn_benchmark,
+        runtime.tf32_matmul,
+        runtime.tf32_cudnn,
+        runtime.float32_matmul_precision,
+        extra=_phase_extra("SYSTEM"),
+    )
+    if runtime.cuda_diagnostic:
+        logger.warning("CUDA 诊断 | %s", runtime.cuda_diagnostic, extra=_phase_extra("SYSTEM"))
+
+
+def _numeric_range(values: list[float]) -> dict[str, float] | None:
+    if not values:
+        return None
+    return {
+        "min": float(min(values)),
+        "max": float(max(values)),
+    }
+
+
+def _build_dataset_summary(payload: dict[str, Any], datasets: dict[str, RHPEBoneAgeDataset]) -> dict[str, Any]:
+    summary = {
+        "dataset_root": payload.get("dataset_root"),
+        "global_loader": "cv2.IMREAD_GRAYSCALE",
+        "global_channels": 1,
+        "splits": {},
+    }
+
+    for split, split_payload in payload["splits"].items():
+        source_records = split_payload["records"]
+        used_records = datasets[split].records if split in datasets else []
+        sources = split_payload.get("sources") or {}
+        first_record = source_records[0] if source_records else {}
+        csv_columns = list(first_record.get("csv_columns", []))
+        sex_values = Counter(int(record.get("male", 0)) for record in source_records)
+        chronological_values = [
+            float(record["chronological"])
+            for record in source_records
+            if record.get("chronological") is not None and not pd.isna(record.get("chronological"))
+        ]
+        boneage_values = [
+            float(record["boneage"])
+            for record in source_records
+            if record.get("has_boneage") and record.get("boneage") is not None and not pd.isna(record.get("boneage"))
+        ]
+        summary["splits"][split] = {
+            "matched_records": len(source_records),
+            "used_records": len(used_records),
+            "csv_columns": csv_columns,
+            "sex_field": "Male" if "Male" in csv_columns else None,
+            "chronological_field": "Chronological" if "Chronological" in csv_columns else None,
+            "boneage_field": "Boneage" if "Boneage" in csv_columns else None,
+            "has_boneage_targets": any(record.get("has_boneage") for record in source_records),
+            "missing_target_count_in_used_records": sum(1 for record in used_records if not record.get("has_boneage")),
+            "sex_distribution": {str(key): int(value) for key, value in sorted(sex_values.items())},
+            "chronological_range": _numeric_range(chronological_values),
+            "boneage_range": _numeric_range(boneage_values),
+            "image_extensions": sorted({Path(record["image_path"]).suffix.lower() for record in source_records}),
+            "sample_id_preview": [record["id"] for record in used_records[:5]],
+            "image_dir": sources.get("image_dir"),
+            "csv_path": sources.get("csv_path"),
+            "roi_json_path": sources.get("roi_json_path"),
+            "id_width": sources.get("id_width"),
+        }
+    return summary
+
+
+def _log_dataset_summary(logger, summary: dict[str, Any]) -> None:
+    logger.info(
+        "图像输入 | loader=%s | channels=%s",
+        summary.get("global_loader"),
+        summary.get("global_channels"),
+        extra=_phase_extra("SYSTEM"),
+    )
+    for split, split_summary in summary.get("splits", {}).items():
+        logger.info(
+            "数据摘要 | split=%s | matched=%s | used=%s | csv_columns=%s | sex_field=%s | chronological_field=%s | boneage_field=%s | image_ext=%s | missing_target_in_used=%s | chronological_range=%s | boneage_range=%s",
+            split,
+            split_summary.get("matched_records"),
+            split_summary.get("used_records"),
+            split_summary.get("csv_columns"),
+            split_summary.get("sex_field"),
+            split_summary.get("chronological_field"),
+            split_summary.get("boneage_field"),
+            split_summary.get("image_extensions"),
+            split_summary.get("missing_target_count_in_used_records"),
+            split_summary.get("chronological_range"),
+            split_summary.get("boneage_range"),
+            extra=_phase_extra("SYSTEM"),
+        )
+
+
+def _build_config_summary(
+    config: dict[str, Any],
+    runtime,
+    datasets: dict[str, Any],
+) -> dict[str, Any]:
+    normalization_cfg = (config.get("data") or {}).get("normalization") or {}
+    return {
+        "experiment_mode": str((config.get("experiment") or {}).get("mode") or "enhanced"),
+        "model_type": _describe_model_type(config),
+        "metadata_mode": str(((config.get("model") or {}).get("metadata") or {}).get("mode") or "mlp"),
+        "input_modalities": _describe_input_modalities(config),
+        "target_type": _describe_target(config),
+        "dataset_size": {split: len(dataset) for split, dataset in datasets.items()},
+        "device": runtime.selected_device,
+        "normalization": {
+            "mean": normalization_cfg.get("mean"),
+            "std": normalization_cfg.get("std"),
+            "source": normalization_cfg.get("resolved_source") or normalization_cfg.get("source"),
+        },
+    }
+
+
+def _log_config_summary(logger, summary: dict[str, Any]) -> None:
+    logger.info("CONFIG SUMMARY:", extra=_phase_extra("SYSTEM"))
+    logger.info("- model type: %s", summary["model_type"], extra=_phase_extra("SYSTEM"))
+    logger.info("- metadata mode: %s", summary["metadata_mode"], extra=_phase_extra("SYSTEM"))
+    logger.info("- input modalities: %s", ", ".join(summary["input_modalities"]), extra=_phase_extra("SYSTEM"))
+    logger.info("- target type: %s", summary["target_type"], extra=_phase_extra("SYSTEM"))
+    logger.info("- dataset size: %s", summary["dataset_size"], extra=_phase_extra("SYSTEM"))
+    logger.info("- device: %s", summary["device"], extra=_phase_extra("SYSTEM"))
+    logger.info(
+        "- image normalization: source=%s mean=%s std=%s",
+        summary["normalization"]["source"],
+        _format_scalar(summary["normalization"]["mean"], precision=8),
+        _format_scalar(summary["normalization"]["std"], precision=8),
+        extra=_phase_extra("SYSTEM"),
+    )
+
+
+def _prepare_artifact_dirs(run_dir: Path) -> dict[str, Path]:
+    return {
+        "model_dir": ensure_dir(run_dir / "model"),
+        "plots_dir": ensure_dir(run_dir / "plots"),
+    }
+
+
 def _build_effective_params_payload(
     config: dict[str, Any],
     runtime,
@@ -341,11 +725,13 @@ def _build_effective_params_payload(
 ) -> dict[str, Any]:
     training_cfg = config["training"]
     runtime_cfg = config.get("runtime") or {}
+    normalization_cfg = (config.get("data") or {}).get("normalization") or {}
     grad_accum_steps = _resolve_gradient_accumulation_steps(config)
     total_epochs = int(training_cfg["epochs"])
     warmup_epochs, warmup_start_factor = _resolve_warmup_settings(config, total_epochs)
     early_stop_patience, early_stop_min_delta = _resolve_early_stopping(config)
     return {
+        "experiment_mode": str((config.get("experiment") or {}).get("mode") or "enhanced"),
         "dataset_sizes": {split: len(dataset) for split, dataset in datasets.items()},
         "device": runtime.selected_device,
         "requested_device": runtime.requested_device,
@@ -380,14 +766,21 @@ def _build_effective_params_payload(
         "input_size": int(config["data"]["input_size"]),
         "local_patch_size": int(config["data"]["local_patch_size"]),
         "global_crop_mode": str(config["data"].get("global_crop_mode")),
+        "model_type": _describe_model_type(config),
+        "input_modalities": _describe_input_modalities(config),
+        "target_type": _describe_target(config),
         "metadata_mode": str(config["model"]["metadata"].get("mode")),
+        "normalization_mean": normalization_cfg.get("mean"),
+        "normalization_std": normalization_cfg.get("std"),
+        "normalization_source": normalization_cfg.get("resolved_source") or normalization_cfg.get("source"),
         "allow_cpu_fallback": bool(runtime_cfg.get("allow_cpu_fallback", False)),
     }
 
 
 def _log_effective_params(logger, payload: dict[str, Any]) -> None:
     logger.info(
-        "Effective params | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s | warmup_epochs=%s | amp=%s | compile=%s(%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | input_size=%s | local_patch_size=%s | metadata_mode=%s | dataset_sizes=%s",
+        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s | warmup_epochs=%s | amp=%s | compile=%s(%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | input_size=%s | local_patch_size=%s | metadata_mode=%s | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
+        payload["experiment_mode"],
         payload["device"],
         payload["epochs"],
         payload["batch_size"],
@@ -411,6 +804,10 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         payload["input_size"],
         payload["local_patch_size"],
         payload["metadata_mode"],
+        payload["target_type"],
+        _format_scalar(payload["normalization_mean"], precision=8),
+        _format_scalar(payload["normalization_std"], precision=8),
+        payload["normalization_source"],
         payload["dataset_sizes"],
         extra=_phase_extra("SYSTEM"),
     )
@@ -713,6 +1110,7 @@ def _save_checkpoint(
         "best_metric": best_metric,
         "config": config,
         "normalizers": {key: normalizer.state_dict() for key, normalizer in normalizers.items()},
+        "image_normalization": copy.deepcopy(((config.get("data") or {}).get("normalization") or {})),
     }
     torch.save(state, checkpoint_path)
 
@@ -740,12 +1138,15 @@ def _log_reports(logger, reports: dict[str, Any]) -> None:
     for split, report in reports.items():
         issues = report["issues"]
         logger.info(
-            "数据检查 | split=%s | matched=%d | missing_image=%d | missing_csv=%d | missing_roi=%d | unreadable=%d",
+            "数据检查 | split=%s | matched=%d | missing_image=%d | missing_csv=%d | missing_roi=%d | duplicate_csv=%d | duplicate_image=%d | duplicate_roi=%d | unreadable=%d",
             split,
             report["matched_records"],
             len(issues["missing_images"]),
             len(issues["missing_csv_records"]),
             len(issues["missing_roi_json"]),
+            len(issues["duplicate_csv_ids"]),
+            len(issues["duplicate_image_ids"]),
+            len(issues["duplicate_roi_ids"]),
             len(issues["unreadable_images"]),
         )
 
@@ -772,12 +1173,23 @@ def train_main(
     overrides: list[str] | None = None,
     control: TrainingControl | None = None,
 ) -> dict[str, Any]:
-    config, checkpoint_state = _resolve_config(
+    base_config, _ = _resolve_config(
         config_path=config_path,
         overrides=overrides,
         checkpoint_path=None,
     )
+    resume_checkpoint = (base_config.get("training") or {}).get("resume_checkpoint")
+    if resume_checkpoint:
+        config, checkpoint_state = _resolve_config(
+            config_path=config_path,
+            overrides=overrides,
+            checkpoint_path=resume_checkpoint,
+        )
+    else:
+        config = base_config
+        checkpoint_state = None
     run_dir = _prepare_run_dir(config, purpose="train")
+    artifact_dirs = _prepare_artifact_dirs(run_dir)
     logger = setup_logger(run_dir)
     if control is not None:
         control.update_phase("system", "initializing")
@@ -787,6 +1199,7 @@ def train_main(
 
     try:
         logger.info("训练任务开始 | run_dir=%s", run_dir, extra=_phase_extra("SYSTEM"))
+        _log_running_mode(logger, config)
         raise_if_stop_requested(control, logger, phase="system", scope="initializing", checkpoint="before_runtime_setup")
 
         device, runtime = detect_runtime(
@@ -795,27 +1208,21 @@ def train_main(
             deterministic=deterministic,
         )
         write_json(runtime.to_dict(), run_dir / "runtime.json")
-        logger.info(
-            "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s | deterministic=%s | cudnn_benchmark=%s | tf32_matmul=%s | tf32_cudnn=%s | matmul_precision=%s",
-            runtime.torch_version,
-            runtime.cuda_build,
-            runtime.cuda_available,
-            runtime.requested_device,
-            runtime.selected_device,
-            runtime.device_names,
-            runtime.deterministic,
-            runtime.cudnn_benchmark,
-            runtime.tf32_matmul,
-            runtime.tf32_cudnn,
-            runtime.float32_matmul_precision,
-        )
+        _log_runtime_info(logger, runtime)
         if runtime.requested_device.startswith("cuda") and device.type != "cuda":
             logger.warning("请求设备 %s 不可用，训练已回退到 CPU。", runtime.requested_device)
 
         raise_if_stop_requested(control, logger, phase="system", scope="loading_data", checkpoint="before_dataset_build")
         payload, reports = _build_data_payload(config, run_dir, checkpoint_state=checkpoint_state)
         _log_reports(logger, reports)
+        _resolve_image_normalization(config, payload, checkpoint_state, run_dir, logger)
         datasets, normalizers = _build_datasets(payload, config, checkpoint_state=checkpoint_state)
+        dataset_summary = _build_dataset_summary(payload, datasets)
+        write_json(dataset_summary, run_dir / "dataset_summary.json")
+        _log_dataset_summary(logger, dataset_summary)
+        config_summary = _build_config_summary(config, runtime, datasets)
+        write_json(config_summary, run_dir / "config_summary.json")
+        _log_config_summary(logger, config_summary)
         dataloaders, loader_kwargs = _build_dataloaders(datasets, config, device)
         write_json(loader_kwargs, run_dir / "dataloader.json")
         _log_dataloader_kwargs(logger, loader_kwargs)
@@ -852,16 +1259,16 @@ def train_main(
 
         start_epoch = 1
         best_metric = None
-        resume_checkpoint = config["training"].get("resume_checkpoint")
-        if resume_checkpoint:
-            resume_state = _load_checkpoint_state(resume_checkpoint)
-            start_epoch = _restore_training_state(model, optimizer, scheduler, scaler, resume_state)
-            best_metric = resume_state.get("best_metric")
+        if checkpoint_state is not None:
+            start_epoch = _restore_training_state(model, optimizer, scheduler, scaler, checkpoint_state)
+            best_metric = checkpoint_state.get("best_metric")
             logger.info("已从 checkpoint 续训: %s | next_epoch=%d", resume_checkpoint, start_epoch)
         elif warmup_epochs > 0:
             _set_optimizer_lr(optimizer, _warmup_lr(base_lr, 1, warmup_epochs, warmup_start_factor))
 
         save_config(config, run_dir / "config.yaml")
+        write_json(config, run_dir / "config.json")
+        write_json({"config": config, "runtime": runtime.to_dict()}, run_dir / "run_config.json")
         effective_payload = _build_effective_params_payload(
             config=config,
             runtime=runtime,
@@ -878,8 +1285,8 @@ def train_main(
         _log_effective_params(logger, effective_payload)
         history_rows = []
         best_metric_name = _validate_best_metric(config["training"]["best_metric"])
-        best_checkpoint_path = run_dir / "best_model.pt"
-        last_checkpoint_path = run_dir / "last_checkpoint.pt"
+        best_checkpoint_path = artifact_dirs["model_dir"] / "best_model.pt"
+        last_checkpoint_path = artifact_dirs["model_dir"] / "last_checkpoint.pt"
         epochs_without_improvement = 0
 
         for epoch in range(start_epoch, total_epochs + 1):
@@ -1015,6 +1422,14 @@ def train_main(
                 "val_mae": val_metrics["mae"] if val_metrics is not None else None,
                 "train_mad": train_metrics["mad"],
                 "val_mad": val_metrics["mad"] if val_metrics is not None else None,
+                "train_final_mae": train_metrics["final_mae"],
+                "val_final_mae": val_metrics["final_mae"] if val_metrics is not None else None,
+                "train_final_mad": train_metrics["final_mad"],
+                "val_final_mad": val_metrics["final_mad"] if val_metrics is not None else None,
+                "train_relative_mae": train_metrics["relative_mae"],
+                "val_relative_mae": val_metrics["relative_mae"] if val_metrics is not None else None,
+                "train_relative_mad": train_metrics["relative_mad"],
+                "val_relative_mad": val_metrics["relative_mad"] if val_metrics is not None else None,
                 "lr_start": lr_start,
                 "lr_end": current_lr,
                 "eval_ran": run_validation,
@@ -1199,6 +1614,7 @@ def evaluate_main(
     logger = setup_logger(run_dir)
     requested_device, allow_cpu_fallback, deterministic = _resolve_runtime_settings(config)
     seed_everything(int(config["experiment"]["seed"]), deterministic=deterministic)
+    _log_running_mode(logger, config)
 
     device, runtime = detect_runtime(
         requested_device=requested_device,
@@ -1206,23 +1622,17 @@ def evaluate_main(
         deterministic=deterministic,
     )
     write_json(runtime.to_dict(), run_dir / "runtime.json")
-    logger.info(
-        "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s | deterministic=%s | cudnn_benchmark=%s | tf32_matmul=%s | tf32_cudnn=%s | matmul_precision=%s",
-        runtime.torch_version,
-        runtime.cuda_build,
-        runtime.cuda_available,
-        runtime.requested_device,
-        runtime.selected_device,
-        runtime.device_names,
-        runtime.deterministic,
-        runtime.cudnn_benchmark,
-        runtime.tf32_matmul,
-        runtime.tf32_cudnn,
-        runtime.float32_matmul_precision,
-    )
+    _log_runtime_info(logger, runtime)
     payload, reports = _build_data_payload(config, run_dir, checkpoint_state=checkpoint_state, manual_split=manual_split)
     _log_reports(logger, reports)
+    _resolve_image_normalization(config, payload, checkpoint_state, run_dir, logger)
     datasets, normalizers = _build_datasets(payload, config, checkpoint_state=checkpoint_state)
+    dataset_summary = _build_dataset_summary(payload, datasets)
+    write_json(dataset_summary, run_dir / "dataset_summary.json")
+    _log_dataset_summary(logger, dataset_summary)
+    config_summary = _build_config_summary(config, runtime, datasets)
+    write_json(config_summary, run_dir / "config_summary.json")
+    _log_config_summary(logger, config_summary)
     dataloaders, loader_kwargs = _build_dataloaders(datasets, config, device)
     write_json(loader_kwargs, run_dir / "dataloader.json")
     _log_dataloader_kwargs(logger, loader_kwargs)
@@ -1262,7 +1672,9 @@ def evaluate_main(
     )
     predictions.to_csv(run_dir / f"{split}_predictions.csv", index=False)
     write_json(metrics, run_dir / f"{split}_metrics.json")
+    write_json(metrics, run_dir / "metrics.json")
     save_config(config, run_dir / "config.yaml")
+    write_json(config, run_dir / "config.json")
     effective_payload = _build_effective_params_payload(
         config=config,
         runtime=runtime,
@@ -1272,6 +1684,7 @@ def evaluate_main(
         use_channels_last=use_channels_last,
     )
     write_json(effective_payload, run_dir / "effective_params.json")
+    write_json({"config": config, "runtime": runtime.to_dict()}, run_dir / "run_config.json")
     logger.info("%s 评估完成 | metrics=%s", split, metrics)
     return {"run_dir": str(run_dir), "metrics": metrics}
 
@@ -1282,7 +1695,9 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
     base_config, _ = _resolve_config(config_path=config_path, overrides=overrides, checkpoint_path=None)
     tune_dir = _prepare_run_dir(base_config, purpose="optuna")
     logger = setup_logger(tune_dir)
+    _log_running_mode(logger, base_config)
     save_config(base_config, tune_dir / "base_config.yaml")
+    write_json(base_config, tune_dir / "base_config.json")
 
     optuna_cfg = base_config["optuna"]
 
@@ -1314,23 +1729,17 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
             deterministic=deterministic,
         )
         write_json(runtime.to_dict(), run_dir / "runtime.json")
-        logger_trial.info(
-            "运行环境 | torch=%s | cuda_build=%s | cuda_available=%s | requested_device=%s | selected_device=%s | gpus=%s | deterministic=%s | cudnn_benchmark=%s | tf32_matmul=%s | tf32_cudnn=%s | matmul_precision=%s",
-            runtime.torch_version,
-            runtime.cuda_build,
-            runtime.cuda_available,
-            runtime.requested_device,
-            runtime.selected_device,
-            runtime.device_names,
-            runtime.deterministic,
-            runtime.cudnn_benchmark,
-            runtime.tf32_matmul,
-            runtime.tf32_cudnn,
-            runtime.float32_matmul_precision,
-        )
+        _log_runtime_info(logger_trial, runtime)
         payload, reports = _build_data_payload(trial_config, run_dir)
         _log_reports(logger_trial, reports)
+        _resolve_image_normalization(trial_config, payload, None, run_dir, logger_trial)
         datasets, normalizers = _build_datasets(payload, trial_config, checkpoint_state=None)
+        dataset_summary = _build_dataset_summary(payload, datasets)
+        write_json(dataset_summary, run_dir / "dataset_summary.json")
+        _log_dataset_summary(logger_trial, dataset_summary)
+        config_summary = _build_config_summary(trial_config, runtime, datasets)
+        write_json(config_summary, run_dir / "config_summary.json")
+        _log_config_summary(logger_trial, config_summary)
         dataloaders, loader_kwargs = _build_dataloaders(datasets, trial_config, device)
         _log_dataloader_kwargs(logger_trial, loader_kwargs)
         model = build_model(trial_config).to(device)

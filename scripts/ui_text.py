@@ -163,6 +163,7 @@ TEXTS: dict[str, dict[str, str]] = {
 OPTION_TEXTS: dict[str, dict[str, dict[str, str]]] = {
     "zh": {
         "experiment.name": {"name": "实验名称", "desc": "本次实验的名称前缀，用于输出目录与日志标识。"},
+        "experiment.mode": {"name": "运行模式声明", "desc": "实验声明模式：enhanced 为工程增强版，simba/bonet_like 用于论文关系说明与消融标记。"},
         "experiment.output_root": {"name": "输出根目录", "desc": "训练产物保存的根目录。"},
         "experiment.seed": {"name": "随机种子", "desc": "控制随机性，保证实验可复现。"},
         "runtime.device": {"name": "运行设备", "desc": "训练使用的设备，例如 cuda:0 或 cpu。"},
@@ -177,6 +178,10 @@ OPTION_TEXTS: dict[str, dict[str, dict[str, str]]] = {
         "data.global_crop_mode": {"name": "全局裁剪模式", "desc": "全局图像裁剪策略。"},
         "data.global_crop_margin_ratio": {"name": "全局裁剪边距比例", "desc": "基于 bbox 裁剪时额外保留的上下文比例。"},
         "data.verify_images": {"name": "图像有效性检查", "desc": "构建索引时是否逐张检查图像可读性。"},
+        "data.normalization.source": {"name": "图像归一化来源", "desc": "使用自动统计的 train mean/std，或手动指定 mean/std。"},
+        "data.normalization.stats_path": {"name": "归一化统计缓存", "desc": "自动统计模式下 train mean/std 的缓存 JSON 路径。"},
+        "data.normalization.mean": {"name": "归一化均值", "desc": "灰度图归一化 mean；auto_train_stats 模式下会自动填充。"},
+        "data.normalization.std": {"name": "归一化标准差", "desc": "灰度图归一化 std；auto_train_stats 模式下会自动填充。"},
         "model.ensemble_mode": {"name": "集成模式", "desc": "选择 ResNet / EfficientNet / 双模型集成。"},
         "model.resnet_name": {"name": "ResNet 主干", "desc": "全局分支使用的 ResNet 版本。"},
         "model.efficientnet_name": {"name": "EfficientNet 主干", "desc": "全局分支使用的 EfficientNet 版本。"},
@@ -255,6 +260,7 @@ OPTION_TEXTS: dict[str, dict[str, dict[str, str]]] = {
     },
     "en": {
         "experiment.name": {"name": "Experiment Name", "desc": "Name prefix for this run, used in the output directory and logs."},
+        "experiment.mode": {"name": "Run Mode Declaration", "desc": "Declaration mode for the experiment: enhanced is the default engineering mode, while simba and bonet_like are used for method-alignment reporting."},
         "experiment.output_root": {"name": "Output Root", "desc": "Root directory for training outputs."},
         "experiment.seed": {"name": "Random Seed", "desc": "Controls randomness to keep experiments reproducible."},
         "runtime.device": {"name": "Runtime Device", "desc": "Device used for training, such as cuda:0 or cpu."},
@@ -269,6 +275,10 @@ OPTION_TEXTS: dict[str, dict[str, dict[str, str]]] = {
         "data.global_crop_mode": {"name": "Global Crop Mode", "desc": "Cropping strategy for the global image branch."},
         "data.global_crop_margin_ratio": {"name": "Global Crop Margin Ratio", "desc": "Extra context ratio kept when cropping from the bounding box."},
         "data.verify_images": {"name": "Image Validation", "desc": "Whether to verify that each image can be read when building the index."},
+        "data.normalization.source": {"name": "Normalization Source", "desc": "Use automatically computed train mean/std or manually specified values."},
+        "data.normalization.stats_path": {"name": "Normalization Cache", "desc": "JSON cache path for train mean/std when automatic statistics are enabled."},
+        "data.normalization.mean": {"name": "Normalization Mean", "desc": "Grayscale normalization mean; auto-filled when auto_train_stats is enabled."},
+        "data.normalization.std": {"name": "Normalization Std", "desc": "Grayscale normalization std; auto-filled when auto_train_stats is enabled."},
         "model.ensemble_mode": {"name": "Ensemble Mode", "desc": "Choose ResNet, EfficientNet, or the dual-model ensemble."},
         "model.resnet_name": {"name": "ResNet Backbone", "desc": "ResNet variant used by the global branch."},
         "model.efficientnet_name": {"name": "EfficientNet Backbone", "desc": "EfficientNet variant used by the global branch."},

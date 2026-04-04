@@ -47,6 +47,9 @@ def build_geometric_transform(config: dict, is_train: bool) -> A.Compose:
 
 def build_image_intensity_transform(config: dict, is_train: bool) -> A.Compose:
     aug_cfg = config["augmentation"]
+    normalization_cfg = (config.get("data") or {}).get("normalization") or {}
+    mean = float(normalization_cfg.get("mean", 0.5))
+    std = float(normalization_cfg.get("std", 0.5))
     transforms = []
     if is_train and aug_cfg.get("use_noise", False):
         transforms.append(
@@ -63,5 +66,5 @@ def build_image_intensity_transform(config: dict, is_train: bool) -> A.Compose:
                 p=aug_cfg["blur_p"],
             )
         )
-    transforms.append(A.Normalize(mean=(0.5,), std=(0.5,), max_pixel_value=255.0))
+    transforms.append(A.Normalize(mean=(mean,), std=(std,), max_pixel_value=255.0))
     return A.Compose(transforms)
