@@ -93,7 +93,7 @@ training:
   amp: true
   gradient_clip: 1.0
   gradient_accumulation_steps: 1
-  compile: true
+  compile: false
   compile_mode: reduce-overhead
   best_metric: mae
   resume_checkpoint: null

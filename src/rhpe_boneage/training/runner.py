@@ -745,6 +745,9 @@ def _build_config_summary(
             "warmup_epochs": int(training_cfg.get("warmup_epochs", 0) or 0),
             "loss": _describe_loss(config),
             "best_metric": str(training_cfg.get("best_metric") or "mae").lower(),
+            "amp_requested": bool(training_cfg.get("amp", False)),
+            "compile_requested": bool(training_cfg.get("compile", False)),
+            "compile_mode": str(training_cfg.get("compile_mode") or "default"),
         },
         "augmentation": _describe_augmentation_profile(config),
         "normalization": {
@@ -797,7 +800,7 @@ def _log_config_summary(logger, summary: dict[str, Any]) -> None:
         extra=_phase_extra("SYSTEM"),
     )
     logger.info(
-        "- optimization: epochs=%s | batch=%s | grad_accum=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | loss=%s | best_metric=%s",
+        "- optimization: epochs=%s | batch=%s | grad_accum=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | amp=%s | compile=%s(mode=%s) | loss=%s | best_metric=%s",
         optimization["epochs"],
         optimization["batch_size"],
         optimization["gradient_accumulation_steps"],
@@ -808,6 +811,9 @@ def _log_config_summary(logger, summary: dict[str, Any]) -> None:
         _format_scalar(optimization["scheduler_factor"], precision=3),
         optimization["scheduler_patience"],
         optimization["warmup_epochs"],
+        optimization["amp_requested"],
+        optimization["compile_requested"],
+        optimization["compile_mode"],
         optimization["loss"],
         optimization["best_metric"],
         extra=_phase_extra("SYSTEM"),
@@ -848,6 +854,7 @@ def _build_effective_params_payload(
     loader_kwargs: dict[str, Any],
     use_amp: bool,
     use_channels_last: bool,
+    compile_info: Any | None = None,
 ) -> dict[str, Any]:
     training_cfg = config["training"]
     runtime_cfg = config.get("runtime") or {}
@@ -861,6 +868,22 @@ def _build_effective_params_payload(
     total_epochs = int(training_cfg["epochs"])
     warmup_epochs, warmup_start_factor = _resolve_warmup_settings(config, total_epochs)
     early_stop_patience, early_stop_min_delta = _resolve_early_stopping(config)
+    compile_requested = bool(training_cfg.get("compile", False))
+    compile_mode = str(training_cfg.get("compile_mode") or "default")
+    compile_available = bool(runtime.compile_available)
+    if runtime.selected_device.startswith("cuda"):
+        compile_available = compile_available and bool(runtime.compile_triton_available)
+    compile_actually_used = False
+    compile_reason = "not attempted in this entry point" if compile_requested else "disabled by config"
+    compile_cudagraphs = None
+    if compile_info is not None:
+        compile_requested = bool(getattr(compile_info, "requested", compile_requested))
+        compile_available = bool(getattr(compile_info, "available", compile_available))
+        compile_actually_used = bool(getattr(compile_info, "actually_used", False))
+        compile_reason = getattr(compile_info, "reason", compile_reason)
+        compile_cudagraphs = getattr(compile_info, "cudagraphs_enabled", None)
+        compile_mode = str(getattr(compile_info, "mode", compile_mode) or compile_mode)
+
     return {
         "experiment_mode": str((config.get("experiment") or {}).get("mode") or "enhanced"),
         "dataset_sizes": {split: len(dataset) for split, dataset in datasets.items()},
@@ -885,9 +908,14 @@ def _build_effective_params_payload(
         "min_lr": float(training_cfg["min_lr"]),
         "loss": _describe_loss(config),
         "best_metric": str(training_cfg.get("best_metric") or "mae").lower(),
-        "amp": use_amp,
-        "compile": bool(training_cfg["compile"]),
-        "compile_mode": str(training_cfg.get("compile_mode") or "default"),
+        "amp_requested": bool(training_cfg.get("amp", False)),
+        "amp_actually_used": use_amp,
+        "compile_requested": compile_requested,
+        "compile_available": compile_available,
+        "compile_actually_used": compile_actually_used,
+        "compile_reason": compile_reason,
+        "compile_mode": compile_mode,
+        "compile_cudagraphs": compile_cudagraphs,
         "eval_interval": _resolve_positive_int(training_cfg.get("eval_interval"), default=1),
         "save_interval": _resolve_positive_int(training_cfg.get("save_interval"), default=1),
         "early_stopping_patience": early_stop_patience,
@@ -933,7 +961,7 @@ def _build_effective_params_payload(
 
 def _log_effective_params(logger, payload: dict[str, Any]) -> None:
     logger.info(
-        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | amp=%s | compile=%s(%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | ensemble=%s | branch=%s | local_mode=%s | metadata=%s(%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s] | input_size=%s | local_patch_size=%s | crop=%s(margin=%s) | sigma=(%s,%s) | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
+        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | amp=%s->%s | compile=%s/%s/%s(mode=%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | ensemble=%s | branch=%s | local_mode=%s | metadata=%s(%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s] | input_size=%s | local_patch_size=%s | crop=%s(margin=%s) | sigma=(%s,%s) | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
         payload["experiment_mode"],
         payload["device"],
         payload["epochs"],
@@ -946,8 +974,11 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         _format_scalar(payload["scheduler_factor"], precision=3),
         payload["scheduler_patience"],
         payload["warmup_epochs"],
-        payload["amp"],
-        payload["compile"],
+        payload["amp_requested"],
+        payload["amp_actually_used"],
+        payload["compile_requested"],
+        payload["compile_available"],
+        payload["compile_actually_used"],
         payload["compile_mode"],
         payload["channels_last"],
         payload["eval_interval"],
@@ -979,6 +1010,16 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         payload["dataset_sizes"],
         extra=_phase_extra("SYSTEM"),
     )
+    if payload.get("compile_reason"):
+        logger.info(
+            "Compile status | requested=%s | available=%s | used=%s | reason=%s | cudagraphs=%s",
+            payload["compile_requested"],
+            payload["compile_available"],
+            payload["compile_actually_used"],
+            payload["compile_reason"],
+            payload.get("compile_cudagraphs"),
+            extra=_phase_extra("SYSTEM"),
+        )
 
 
 def _load_checkpoint_state(checkpoint_path: str | Path | None) -> dict[str, Any] | None:
@@ -1406,7 +1447,7 @@ def train_main(
         if use_channels_last:
             model = model.to(memory_format=torch.channels_last)
         log_device_probe(model, device, logger)
-        model = maybe_compile_model(
+        model, compile_info = maybe_compile_model(
             model,
             bool(config["training"]["compile"]),
             logger,
@@ -1449,6 +1490,7 @@ def train_main(
             loader_kwargs=loader_kwargs,
             use_amp=use_amp,
             use_channels_last=use_channels_last,
+            compile_info=compile_info,
         )
         effective_payload["eval_interval"] = eval_interval
         effective_payload["save_interval"] = save_interval
@@ -1920,7 +1962,7 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
         if use_channels_last:
             model = model.to(memory_format=torch.channels_last)
         log_device_probe(model, device, logger_trial)
-        model = maybe_compile_model(
+        model, compile_info = maybe_compile_model(
             model,
             bool(trial_config["training"]["compile"]),
             logger_trial,

@@ -54,6 +54,19 @@ class RuntimeInfo:
         return asdict(self)
 
 
+@dataclass
+class CompileInfo:
+    requested: bool
+    available: bool
+    actually_used: bool
+    mode: str
+    reason: str | None = None
+    cudagraphs_enabled: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _normalize_requested_device(requested_device: str | None) -> str:
     normalized = (requested_device or "cuda:0").strip().lower()
     if not normalized:
@@ -294,6 +307,17 @@ def _compile_mode_options(mode: str) -> dict[str, Any]:
     return dict(options)
 
 
+def _available_compile_modes() -> set[str]:
+    if not hasattr(torch, "_inductor") or not hasattr(torch._inductor, "list_mode_options"):
+        return {"default"}
+    try:
+        modes = set(torch._inductor.list_mode_options().keys())
+    except Exception:
+        return {"default"}
+    modes.add("default")
+    return modes
+
+
 def _has_multi_backbone_ensemble(model: torch.nn.Module) -> bool:
     return bool(
         getattr(model, "resnet", None) is not None
@@ -306,22 +330,70 @@ def maybe_compile_model(
     enabled: bool,
     logger,
     mode: str | None = None,
-) -> torch.nn.Module:
-    if not enabled:
-        logger.info("torch.compile: 配置关闭，跳过。")
-        return model
-    if not hasattr(torch, "compile"):
-        logger.warning("torch.compile: 当前 torch 不支持，自动降级。")
-        return model
+) -> tuple[torch.nn.Module, CompileInfo]:
+    normalized_mode = (mode or "default").strip().lower() or "default"
     model_device = _model_device(model)
-    if model_device.type == "cuda" and not _cuda_compile_is_available():
-        logger.warning("torch.compile: 当前 CUDA 环境缺少可用 Triton，自动降级。")
-        return model
+    torch_compile_available = hasattr(torch, "compile")
+    triton_available = model_device.type != "cuda" or _cuda_compile_is_available()
+    available_modes = _available_compile_modes()
+    mode_available = normalized_mode in available_modes
+    compile_available = bool(torch_compile_available and triton_available and mode_available)
+
+    logger.info("torch.compile requested: %s", bool(enabled))
+    logger.info("torch.compile available: %s", compile_available)
+
+    if not enabled:
+        info = CompileInfo(
+            requested=False,
+            available=compile_available,
+            actually_used=False,
+            mode=normalized_mode,
+            reason="disabled by config",
+        )
+        logger.info("torch.compile actually used: %s", info.actually_used)
+        logger.info("torch.compile reason: %s", info.reason)
+        return model, info
+    if not torch_compile_available:
+        info = CompileInfo(
+            requested=True,
+            available=False,
+            actually_used=False,
+            mode=normalized_mode,
+            reason="current torch build does not provide torch.compile",
+        )
+        logger.warning("torch.compile actually used: %s", info.actually_used)
+        logger.warning("torch.compile reason: %s", info.reason)
+        return model, info
+    if not mode_available:
+        info = CompileInfo(
+            requested=True,
+            available=False,
+            actually_used=False,
+            mode=normalized_mode,
+            reason=f"unsupported compile mode: {normalized_mode}",
+        )
+        logger.warning("torch.compile actually used: %s", info.actually_used)
+        logger.warning("torch.compile reason: %s", info.reason)
+        return model, info
+    if not triton_available:
+        info = CompileInfo(
+            requested=True,
+            available=False,
+            actually_used=False,
+            mode=normalized_mode,
+            reason="current CUDA environment lacks usable Triton support for torch.compile",
+        )
+        logger.warning("torch.compile actually used: %s", info.actually_used)
+        logger.warning("torch.compile reason: %s", info.reason)
+        return model, info
+
+    model_device = _model_device(model)
     try:
-        normalized_mode = (mode or "default").strip().lower()
         mode_options = _compile_mode_options(normalized_mode)
         compile_kwargs: dict[str, Any] = {}
-        cudagraphs_enabled = bool(mode_options.get("triton.cudagraphs", False))
+        cudagraphs_enabled = mode_options.get("triton.cudagraphs") if model_device.type == "cuda" else None
+        if normalized_mode != "default":
+            compile_kwargs["mode"] = normalized_mode
         if model_device.type == "cuda" and _has_multi_backbone_ensemble(model):
             safe_options = dict(mode_options)
             safe_options["triton.cudagraphs"] = False
@@ -330,14 +402,30 @@ def maybe_compile_model(
             logger.warning(
                 "torch.compile: 检测到双-backbone ensemble，已自动禁用 CUDAGraphs，以规避顺序分支前向时的输出覆盖问题。"
             )
-        elif normalized_mode and normalized_mode != "default":
-            compile_kwargs["mode"] = normalized_mode
         compiled = torch.compile(model, **compile_kwargs)
-        logger.info("torch.compile: 已启用 | mode=%s | cudagraphs=%s", normalized_mode, cudagraphs_enabled)
-        return compiled
+        info = CompileInfo(
+            requested=True,
+            available=True,
+            actually_used=True,
+            mode=normalized_mode,
+            reason=None,
+            cudagraphs_enabled=bool(cudagraphs_enabled) if cudagraphs_enabled is not None else None,
+        )
+        logger.info("torch.compile actually used: %s", info.actually_used)
+        logger.info("torch.compile details: mode=%s | cudagraphs=%s", normalized_mode, info.cudagraphs_enabled)
+        return compiled, info
     except Exception as exc:  # pragma: no cover - 编译失败时的保护逻辑
-        logger.warning("torch.compile: 启用失败，自动降级。原因: %s", exc)
-        return model
+        info = CompileInfo(
+            requested=True,
+            available=True,
+            actually_used=False,
+            mode=normalized_mode,
+            reason=str(exc),
+            cudagraphs_enabled=None,
+        )
+        logger.warning("torch.compile actually used: %s", info.actually_used)
+        logger.warning("torch.compile reason: %s", info.reason)
+        return model, info
 
 
 def get_cuda_memory_snapshot(device: torch.device) -> dict[str, float] | None:

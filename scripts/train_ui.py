@@ -42,6 +42,7 @@ PRESET_OPTIONS: dict[str, list[str]] = {
     "training.scheduler": ["plateau", "cosine", "none"],
     "training.loss": ["smoothl1", "l1", "mse"],
     "training.best_metric": ["mae", "mad", "loss"],
+    "training.compile_mode": ["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs", "lite"],
 }
 
 STRICT_OPTIONS: dict[str, set[str]] = {
@@ -170,6 +171,10 @@ def _text_field(path: str, group: str, width: int = 26) -> UiFieldSpec:
 
 
 VISIBLE_FIELD_SPECS: tuple[UiFieldSpec, ...] = (
+    _bool_field("training.compile", "basic"),
+    _bool_field("training.amp", "basic"),
+    _text_field("runtime.device", "basic", width=18),
+    _bool_field("runtime.allow_cpu_fallback", "basic"),
     _enum_field("experiment.mode", "basic"),
     _text_field("experiment.name", "basic", width=30),
     _int_field("experiment.seed", "basic", minimum=0, maximum=99999999),
@@ -222,6 +227,12 @@ VISIBLE_FIELD_SPECS: tuple[UiFieldSpec, ...] = (
     _enum_field("training.best_metric", "output"),
     _int_field("training.early_stopping_patience", "output", minimum=0, maximum=100),
     _float_field("training.early_stopping_min_delta", "output", minimum=0.0, maximum=10.0, increment=0.005),
+    _bool_field("runtime.deterministic", "advanced"),
+    _bool_field("runtime.channels_last", "advanced"),
+    _enum_field("training.compile_mode", "advanced", width=26),
+    _int_field("training.prefetch_factor", "advanced", minimum=1, maximum=16),
+    _bool_field("training.persistent_workers", "advanced"),
+    _bool_field("training.pin_memory", "advanced"),
     _int_field("model.global_dim", "advanced", minimum=16, maximum=2048, increment=16),
     _int_field("model.metadata.hidden_dim", "advanced", minimum=8, maximum=1024, increment=8),
     _float_field("model.metadata.dropout", "advanced", minimum=0.0, maximum=0.9, increment=0.05),
@@ -1015,6 +1026,8 @@ class TrainUI:
             return bool(values.get("augmentation.use_blur"))
         if path == "training.momentum":
             return optimizer_name == "sgd"
+        if path == "training.compile_mode":
+            return bool(values.get("training.compile"))
         if path in {"training.scheduler_factor", "training.scheduler_patience"}:
             return scheduler_name == "plateau"
         if path == "training.min_lr":
