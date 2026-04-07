@@ -27,6 +27,24 @@ except ModuleNotFoundError:
     from scripts.ui_text import UITextManager, normalize_visible_text
 
 
+def _resolve_compile_mode_options() -> list[str]:
+    fallback = ["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs", "lite"]
+    try:
+        import torch
+    except Exception:
+        return fallback
+
+    available = {"default"}
+    if hasattr(torch, "_inductor") and hasattr(torch._inductor, "list_mode_options"):
+        try:
+            available.update(str(mode) for mode in torch._inductor.list_mode_options().keys())
+        except Exception:
+            return fallback
+    ordered = [mode for mode in fallback if mode in available]
+    extras = sorted(mode for mode in available if mode not in ordered)
+    return ordered + extras
+
+
 PRESET_OPTIONS: dict[str, list[str]] = {
     "experiment.mode": ["enhanced", "simba", "bonet_like"],
     "data.global_crop_mode": ["bbox", "full"],
@@ -43,7 +61,7 @@ PRESET_OPTIONS: dict[str, list[str]] = {
     "training.scheduler": ["plateau", "cosine", "none"],
     "training.loss": ["smoothl1", "l1", "mse"],
     "training.best_metric": ["mae", "mad", "loss"],
-    "training.compile_mode": ["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs", "lite"],
+    "training.compile_mode": _resolve_compile_mode_options(),
 }
 
 STRICT_OPTIONS: dict[str, set[str]] = {

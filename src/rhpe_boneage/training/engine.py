@@ -252,6 +252,7 @@ def run_epoch(
     control: TrainingControl | None = None,
     grad_accum_steps: int = 1,
     channels_last: bool = True,
+    compile_active: bool = False,
 ) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any]]:
     model.train(train)
     phase = "train" if train else "eval"
@@ -308,8 +309,11 @@ def run_epoch(
             extra={"phase": phase.upper()},
         )
         logger.info(
-            "正在等待首个 batch | scope=%s | 首次可能因数据预处理、DataLoader worker 启动和 torch.compile 预热而偏慢。",
+            "正在等待首个 batch | scope=%s | 首次可能因%s而偏慢。",
             scope_label,
+            "数据预处理、DataLoader worker 启动和 torch.compile 预热"
+            if compile_active
+            else "数据预处理和 DataLoader worker 启动",
             extra={"phase": phase.upper()},
         )
 

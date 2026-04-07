@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import time
 from collections import Counter
@@ -84,6 +85,15 @@ def _format_feature_list(features: list[str] | tuple[str, ...] | None) -> str:
     if not features:
         return "none"
     return ", ".join(str(feature) for feature in features)
+
+
+def _format_compile_options(options: dict[str, Any] | None) -> str:
+    if not options:
+        return "none"
+    try:
+        return json.dumps(options, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(options)
 
 
 def _resolve_log_interval(config: dict[str, Any]) -> int:
@@ -928,6 +938,10 @@ def _build_effective_params_payload(
     compile_actually_used = False
     compile_reason = "not attempted in this entry point" if compile_requested else "disabled by config"
     compile_cudagraphs = None
+    compile_backend = "inductor"
+    compile_effective_mode = compile_mode
+    compile_call_mode = None
+    compile_call_options: dict[str, Any] = {}
     compile_disabled_features: list[str] = []
     compile_safety_downgrade = False
     compile_options_override = False
@@ -938,6 +952,10 @@ def _build_effective_params_payload(
         compile_reason = getattr(compile_info, "reason", compile_reason)
         compile_cudagraphs = getattr(compile_info, "cudagraphs_enabled", None)
         compile_mode = str(getattr(compile_info, "mode", compile_mode) or compile_mode)
+        compile_backend = str(getattr(compile_info, "backend", compile_backend) or compile_backend)
+        compile_effective_mode = str(getattr(compile_info, "effective_mode", compile_mode) or compile_mode)
+        compile_call_mode = getattr(compile_info, "call_mode", None)
+        compile_call_options = dict(getattr(compile_info, "call_options", {}) or {})
         compile_disabled_features = list(getattr(compile_info, "disabled_features", []) or [])
         compile_safety_downgrade = bool(getattr(compile_info, "safety_downgrade", False))
         compile_options_override = bool(getattr(compile_info, "options_override_used", False))
@@ -973,6 +991,10 @@ def _build_effective_params_payload(
         "compile_actually_used": compile_actually_used,
         "compile_reason": compile_reason,
         "compile_mode": compile_mode,
+        "compile_backend": compile_backend,
+        "compile_effective_mode": compile_effective_mode,
+        "compile_call_mode": compile_call_mode,
+        "compile_call_options": compile_call_options,
         "compile_cudagraphs": compile_cudagraphs,
         "compile_disabled_features": compile_disabled_features,
         "compile_safety_downgrade": compile_safety_downgrade,
@@ -1072,11 +1094,15 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         extra=_phase_extra("SYSTEM"),
     )
     logger.info(
-        "Compile status | requested=%s | available=%s | used=%s | mode=%s | reason=%s | cudagraphs=%s | disabled_features=%s | safety_downgrade=%s | options_override=%s",
+        "Compile status | requested=%s | available=%s | used=%s | requested_mode=%s | effective_mode=%s | backend=%s | call_mode=%s | options=%s | reason=%s | cudagraphs=%s | disabled_features=%s | safety_downgrade=%s | options_override=%s",
         payload["compile_requested"],
         payload["compile_available"],
         payload["compile_actually_used"],
         payload["compile_mode"],
+        payload.get("compile_effective_mode") or payload["compile_mode"],
+        payload.get("compile_backend") or "inductor",
+        payload.get("compile_call_mode") or "none",
+        _format_compile_options(payload.get("compile_call_options")),
         payload.get("compile_reason") or "n/a",
         payload.get("compile_cudagraphs"),
         _format_feature_list(payload.get("compile_disabled_features")),
@@ -1603,6 +1629,7 @@ def train_main(
                 control=control,
                 grad_accum_steps=grad_accum_steps,
                 channels_last=use_channels_last,
+                compile_active=bool(compile_info.actually_used),
             )
             raise_if_stop_requested(control, logger, phase="train", scope=f"{epoch}/{total_epochs}", checkpoint="after_train_phase")
             run_validation = "val" in dataloaders and _should_run_validation(epoch, total_epochs, eval_interval)
@@ -1632,6 +1659,7 @@ def train_main(
                     lr_override=lr_start,
                     control=control,
                     channels_last=use_channels_last,
+                    compile_active=bool(compile_info.actually_used),
                 )
                 raise_if_stop_requested(control, logger, phase="eval", scope=f"{epoch}/{total_epochs}", checkpoint="after_eval_phase")
             else:
@@ -1838,6 +1866,7 @@ def train_main(
             progress_label="best-val",
             control=control,
             channels_last=use_channels_last,
+            compile_active=bool(compile_info.actually_used),
         )
         val_predictions.to_csv(run_dir / "val_predictions.csv", index=False)
         write_json(val_metrics, run_dir / "val_metrics.json")
@@ -1873,6 +1902,7 @@ def train_main(
                 progress_label="test",
                 control=control,
                 channels_last=use_channels_last,
+                compile_active=bool(compile_info.actually_used),
             )
             test_predictions.to_csv(run_dir / "test_predictions.csv", index=False)
             write_json(test_metrics, run_dir / "test_metrics.json")
@@ -2008,6 +2038,7 @@ def evaluate_main(
         log_interval=log_interval,
         progress_label=split,
         channels_last=use_channels_last,
+        compile_active=False,
     )
     predictions.to_csv(run_dir / f"{split}_predictions.csv", index=False)
     write_json(metrics, run_dir / f"{split}_metrics.json")
@@ -2135,6 +2166,7 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
                 log_interval=log_interval,
                 grad_accum_steps=grad_accum_steps,
                 channels_last=use_channels_last,
+                compile_active=bool(compile_info.actually_used),
             )
             val_metrics, _, val_stats = run_epoch(
                 model=model,
@@ -2154,6 +2186,7 @@ def tune_main(config_path: str | Path, overrides: list[str] | None = None) -> di
                 log_interval=log_interval,
                 lr_override=lr_start,
                 channels_last=use_channels_last,
+                compile_active=bool(compile_info.actually_used),
             )
             value = val_metrics["mae"] if val_metrics["mae"] is not None else 1e9
             trial.report(value, step=epoch)

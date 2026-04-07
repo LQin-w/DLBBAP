@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import importlib
+import json
 import locale
 import os
 import platform
@@ -60,6 +61,10 @@ class CompileInfo:
     available: bool
     actually_used: bool
     mode: str
+    backend: str = "inductor"
+    effective_mode: str | None = None
+    call_mode: str | None = None
+    call_options: dict[str, Any] = field(default_factory=dict)
     reason: str | None = None
     cudagraphs_enabled: bool | None = None
     disabled_features: list[str] = field(default_factory=list)
@@ -334,14 +339,50 @@ def _compile_disabled_features_text(features: list[str]) -> str:
     return ", ".join(features)
 
 
+def _format_compile_options(options: dict[str, Any]) -> str:
+    if not options:
+        return "none"
+    try:
+        return json.dumps(options, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(options)
+
+
+def _match_compile_mode_by_options(options: dict[str, Any]) -> str | None:
+    if not hasattr(torch, "_inductor") or not hasattr(torch._inductor, "list_mode_options"):
+        return "default" if not options else None
+    try:
+        mode_options = torch._inductor.list_mode_options()
+    except Exception:
+        return "default" if not options else None
+    normalized = dict(options)
+    if not normalized:
+        return "default"
+    for mode_name, candidate_options in mode_options.items():
+        if dict(candidate_options) == normalized:
+            return str(mode_name)
+    if normalized.get("triton.cudagraphs") is False:
+        trimmed = {key: value for key, value in normalized.items() if not (key == "triton.cudagraphs" and value is False)}
+        for mode_name, candidate_options in mode_options.items():
+            if "cudagraphs" not in str(mode_name):
+                continue
+            if dict(candidate_options) == trimmed:
+                return str(mode_name)
+    return None
+
+
 def _log_compile_info(logger, info: CompileInfo, *, level: str = "info") -> None:
     log_method = getattr(logger, level, logger.info)
     log_method("torch.compile actually used: %s", info.actually_used)
     if info.reason:
         log_method("torch.compile reason: %s", info.reason)
     log_method(
-        "torch.compile details: mode=%s | cudagraphs=%s | disabled_features=%s | safety_downgrade=%s | options_override=%s",
+        "torch.compile call: requested_mode=%s | effective_mode=%s | backend=%s | call_mode=%s | options=%s | cudagraphs=%s | disabled_features=%s | safety_downgrade=%s | options_override=%s",
         info.mode,
+        info.effective_mode or info.mode,
+        info.backend,
+        info.call_mode or "none",
+        _format_compile_options(info.call_options),
         info.cudagraphs_enabled,
         _compile_disabled_features_text(info.disabled_features),
         info.safety_downgrade,
@@ -355,25 +396,49 @@ def _build_compile_kwargs(
     *,
     is_cuda: bool,
     disable_cudagraphs_for_safety: bool,
-) -> tuple[dict[str, Any], bool | None, list[str], bool, bool]:
+) -> tuple[dict[str, Any], str, str | None, dict[str, Any], bool | None, list[str], bool, bool]:
     compile_kwargs: dict[str, Any] = {}
+    effective_mode = mode
+    call_mode = None
+    call_options: dict[str, Any] = {}
     disabled_features: list[str] = []
     options_override_used = False
     safety_downgrade = False
     cudagraphs_enabled = mode_options.get("triton.cudagraphs") if is_cuda else None
+    if is_cuda and cudagraphs_enabled is None and "no-cudagraphs" in mode:
+        cudagraphs_enabled = False
+    cudagraphs_requested = bool(cudagraphs_enabled) if cudagraphs_enabled is not None else False
 
-    if disable_cudagraphs_for_safety:
+    if disable_cudagraphs_for_safety and cudagraphs_requested:
         safety_downgrade = True
         disabled_features.append("triton.cudagraphs")
         safe_options = dict(mode_options)
         safe_options["triton.cudagraphs"] = False
-        compile_kwargs["options"] = safe_options
-        options_override_used = True
+        matched_safe_mode = _match_compile_mode_by_options(safe_options)
+        if matched_safe_mode is not None and matched_safe_mode != "default":
+            compile_kwargs["mode"] = matched_safe_mode
+            call_mode = matched_safe_mode
+            effective_mode = matched_safe_mode
+        else:
+            compile_kwargs["options"] = safe_options
+            call_options = dict(safe_options)
+            options_override_used = True
+            effective_mode = f"{mode} (no-cudagraphs safe)"
         cudagraphs_enabled = False
     elif mode != "default":
         compile_kwargs["mode"] = mode
+        call_mode = mode
 
-    return compile_kwargs, cudagraphs_enabled, disabled_features, safety_downgrade, options_override_used
+    return (
+        compile_kwargs,
+        effective_mode,
+        call_mode,
+        call_options,
+        cudagraphs_enabled,
+        disabled_features,
+        safety_downgrade,
+        options_override_used,
+    )
 
 
 def maybe_compile_model(
@@ -399,6 +464,7 @@ def maybe_compile_model(
             available=compile_available,
             actually_used=False,
             mode=normalized_mode,
+            effective_mode=normalized_mode,
             reason="disabled by config",
         )
         _log_compile_info(logger, info, level="info")
@@ -409,6 +475,7 @@ def maybe_compile_model(
             available=False,
             actually_used=False,
             mode=normalized_mode,
+            effective_mode=normalized_mode,
             reason="current torch build does not provide torch.compile",
         )
         _log_compile_info(logger, info, level="warning")
@@ -419,6 +486,7 @@ def maybe_compile_model(
             available=False,
             actually_used=False,
             mode=normalized_mode,
+            effective_mode=normalized_mode,
             reason=f"unsupported compile mode: {normalized_mode}",
         )
         _log_compile_info(logger, info, level="warning")
@@ -429,6 +497,7 @@ def maybe_compile_model(
             available=False,
             actually_used=False,
             mode=normalized_mode,
+            effective_mode=normalized_mode,
             reason="current CUDA environment lacks usable Triton support for torch.compile",
         )
         _log_compile_info(logger, info, level="warning")
@@ -438,7 +507,16 @@ def maybe_compile_model(
     try:
         mode_options = _compile_mode_options(normalized_mode)
         multi_backbone_ensemble = model_device.type == "cuda" and _has_multi_backbone_ensemble(model)
-        compile_kwargs, cudagraphs_enabled, disabled_features, safety_downgrade, options_override_used = (
+        (
+            compile_kwargs,
+            effective_mode,
+            call_mode,
+            call_options,
+            cudagraphs_enabled,
+            disabled_features,
+            safety_downgrade,
+            options_override_used,
+        ) = (
             _build_compile_kwargs(
                 normalized_mode,
                 mode_options,
@@ -456,6 +534,9 @@ def maybe_compile_model(
             available=True,
             actually_used=True,
             mode=normalized_mode,
+            effective_mode=effective_mode,
+            call_mode=call_mode,
+            call_options=call_options,
             reason=None,
             cudagraphs_enabled=bool(cudagraphs_enabled) if cudagraphs_enabled is not None else None,
             disabled_features=disabled_features,
@@ -470,6 +551,9 @@ def maybe_compile_model(
             available=True,
             actually_used=False,
             mode=normalized_mode,
+            effective_mode=effective_mode if "effective_mode" in locals() else normalized_mode,
+            call_mode=call_mode if "call_mode" in locals() else None,
+            call_options=call_options if "call_options" in locals() else {},
             reason=str(exc),
             cudagraphs_enabled=None,
             disabled_features=disabled_features if "disabled_features" in locals() else [],
