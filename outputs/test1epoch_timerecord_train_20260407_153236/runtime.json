@@ -1,0 +1,41 @@
+{
+  "python": "3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0]",
+  "python_executable": "/home/lqw/anaconda3/envs/MyBysj/bin/python",
+  "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "is_wsl": true,
+  "filesystem_encoding": "utf-8",
+  "preferred_encoding": "UTF-8",
+  "stdout_encoding": "utf-8",
+  "stderr_encoding": "utf-8",
+  "torch_version": "2.10.0+cu130",
+  "torchvision_version": "0.25.0+cu130",
+  "torchaudio_version": "2.10.0+cu130",
+  "numpy_version": "2.4.2",
+  "pandas_version": "3.0.0",
+  "cuda_build": "13.0",
+  "torch_cuda_built": true,
+  "cuda_available": true,
+  "amp_available": true,
+  "compile_available": true,
+  "compile_triton_available": true,
+  "device_count": 1,
+  "device_names": [
+    "NVIDIA GeForce RTX 3060 Laptop GPU"
+  ],
+  "requested_device": "cuda:0",
+  "selected_device": "cuda:0",
+  "deterministic": false,
+  "cudnn_benchmark": true,
+  "tf32_matmul": true,
+  "tf32_cudnn": true,
+  "float32_matmul_precision": "high",
+  "nvidia_smi_available": true,
+  "nvidia_smi_summary": "driver=591.86 | gpus=['NVIDIA GeForce RTX 3060 Laptop GPU']",
+  "nvidia_smi_gpu_names": [
+    "NVIDIA GeForce RTX 3060 Laptop GPU"
+  ],
+  "device_nodes": [
+    "/dev/dxg"
+  ],
+  "cuda_diagnostic": null
+}

@@ -7,7 +7,7 @@ import os
 import platform
 import shutil
 import subprocess
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any
 
 import sys
@@ -62,6 +62,9 @@ class CompileInfo:
     mode: str
     reason: str | None = None
     cudagraphs_enabled: bool | None = None
+    disabled_features: list[str] = field(default_factory=list)
+    safety_downgrade: bool = False
+    options_override_used: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -325,6 +328,54 @@ def _has_multi_backbone_ensemble(model: torch.nn.Module) -> bool:
     )
 
 
+def _compile_disabled_features_text(features: list[str]) -> str:
+    if not features:
+        return "none"
+    return ", ".join(features)
+
+
+def _log_compile_info(logger, info: CompileInfo, *, level: str = "info") -> None:
+    log_method = getattr(logger, level, logger.info)
+    log_method("torch.compile actually used: %s", info.actually_used)
+    if info.reason:
+        log_method("torch.compile reason: %s", info.reason)
+    log_method(
+        "torch.compile details: mode=%s | cudagraphs=%s | disabled_features=%s | safety_downgrade=%s | options_override=%s",
+        info.mode,
+        info.cudagraphs_enabled,
+        _compile_disabled_features_text(info.disabled_features),
+        info.safety_downgrade,
+        info.options_override_used,
+    )
+
+
+def _build_compile_kwargs(
+    mode: str,
+    mode_options: dict[str, Any],
+    *,
+    is_cuda: bool,
+    disable_cudagraphs_for_safety: bool,
+) -> tuple[dict[str, Any], bool | None, list[str], bool, bool]:
+    compile_kwargs: dict[str, Any] = {}
+    disabled_features: list[str] = []
+    options_override_used = False
+    safety_downgrade = False
+    cudagraphs_enabled = mode_options.get("triton.cudagraphs") if is_cuda else None
+
+    if disable_cudagraphs_for_safety:
+        safety_downgrade = True
+        disabled_features.append("triton.cudagraphs")
+        safe_options = dict(mode_options)
+        safe_options["triton.cudagraphs"] = False
+        compile_kwargs["options"] = safe_options
+        options_override_used = True
+        cudagraphs_enabled = False
+    elif mode != "default":
+        compile_kwargs["mode"] = mode
+
+    return compile_kwargs, cudagraphs_enabled, disabled_features, safety_downgrade, options_override_used
+
+
 def maybe_compile_model(
     model: torch.nn.Module,
     enabled: bool,
@@ -350,8 +401,7 @@ def maybe_compile_model(
             mode=normalized_mode,
             reason="disabled by config",
         )
-        logger.info("torch.compile actually used: %s", info.actually_used)
-        logger.info("torch.compile reason: %s", info.reason)
+        _log_compile_info(logger, info, level="info")
         return model, info
     if not torch_compile_available:
         info = CompileInfo(
@@ -361,8 +411,7 @@ def maybe_compile_model(
             mode=normalized_mode,
             reason="current torch build does not provide torch.compile",
         )
-        logger.warning("torch.compile actually used: %s", info.actually_used)
-        logger.warning("torch.compile reason: %s", info.reason)
+        _log_compile_info(logger, info, level="warning")
         return model, info
     if not mode_available:
         info = CompileInfo(
@@ -372,8 +421,7 @@ def maybe_compile_model(
             mode=normalized_mode,
             reason=f"unsupported compile mode: {normalized_mode}",
         )
-        logger.warning("torch.compile actually used: %s", info.actually_used)
-        logger.warning("torch.compile reason: %s", info.reason)
+        _log_compile_info(logger, info, level="warning")
         return model, info
     if not triton_available:
         info = CompileInfo(
@@ -383,22 +431,22 @@ def maybe_compile_model(
             mode=normalized_mode,
             reason="current CUDA environment lacks usable Triton support for torch.compile",
         )
-        logger.warning("torch.compile actually used: %s", info.actually_used)
-        logger.warning("torch.compile reason: %s", info.reason)
+        _log_compile_info(logger, info, level="warning")
         return model, info
 
     model_device = _model_device(model)
     try:
         mode_options = _compile_mode_options(normalized_mode)
-        compile_kwargs: dict[str, Any] = {}
-        cudagraphs_enabled = mode_options.get("triton.cudagraphs") if model_device.type == "cuda" else None
-        if normalized_mode != "default":
-            compile_kwargs["mode"] = normalized_mode
-        if model_device.type == "cuda" and _has_multi_backbone_ensemble(model):
-            safe_options = dict(mode_options)
-            safe_options["triton.cudagraphs"] = False
-            compile_kwargs["options"] = safe_options
-            cudagraphs_enabled = False
+        multi_backbone_ensemble = model_device.type == "cuda" and _has_multi_backbone_ensemble(model)
+        compile_kwargs, cudagraphs_enabled, disabled_features, safety_downgrade, options_override_used = (
+            _build_compile_kwargs(
+                normalized_mode,
+                mode_options,
+                is_cuda=model_device.type == "cuda",
+                disable_cudagraphs_for_safety=multi_backbone_ensemble,
+            )
+        )
+        if safety_downgrade:
             logger.warning(
                 "torch.compile: 检测到双-backbone ensemble，已自动禁用 CUDAGraphs，以规避顺序分支前向时的输出覆盖问题。"
             )
@@ -410,9 +458,11 @@ def maybe_compile_model(
             mode=normalized_mode,
             reason=None,
             cudagraphs_enabled=bool(cudagraphs_enabled) if cudagraphs_enabled is not None else None,
+            disabled_features=disabled_features,
+            safety_downgrade=safety_downgrade,
+            options_override_used=options_override_used,
         )
-        logger.info("torch.compile actually used: %s", info.actually_used)
-        logger.info("torch.compile details: mode=%s | cudagraphs=%s", normalized_mode, info.cudagraphs_enabled)
+        _log_compile_info(logger, info, level="info")
         return compiled, info
     except Exception as exc:  # pragma: no cover - 编译失败时的保护逻辑
         info = CompileInfo(
@@ -422,9 +472,11 @@ def maybe_compile_model(
             mode=normalized_mode,
             reason=str(exc),
             cudagraphs_enabled=None,
+            disabled_features=disabled_features if "disabled_features" in locals() else [],
+            safety_downgrade=safety_downgrade if "safety_downgrade" in locals() else False,
+            options_override_used=options_override_used if "options_override_used" in locals() else False,
         )
-        logger.warning("torch.compile actually used: %s", info.actually_used)
-        logger.warning("torch.compile reason: %s", info.reason)
+        _log_compile_info(logger, info, level="warning")
         return model, info
 
 

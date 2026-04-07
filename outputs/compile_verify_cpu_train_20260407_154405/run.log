@@ -1,0 +1,69 @@
+2026-04-07 15:44:05 | INFO | SYSTEM  | 训练任务开始 | run_dir=outputs/compile_verify_cpu_train_20260407_154405 | timer_source=runner | elapsed=00:00:00
+2026-04-07 15:44:05 | INFO | SYSTEM  | Running mode: enhanced (default)
+2026-04-07 15:44:05 | INFO | SYSTEM  | - SIMBA: partial
+2026-04-07 15:44:05 | INFO | SYSTEM  | - BoNet: partial
+2026-04-07 15:44:05 | INFO | SYSTEM  | Mode note: Engineering-enhanced multimodal framework.
+2026-04-07 15:44:05 | INFO | SYSTEM  | 运行环境 | python=3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0] | executable=/home/lqw/anaconda3/envs/MyBysj/bin/python | platform=Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39 | is_wsl=True | filesystem_encoding=utf-8 | preferred_encoding=UTF-8 | stdout_encoding=utf-8
+2026-04-07 15:44:05 | INFO | SYSTEM  | 依赖版本 | torch=2.10.0+cu130 | torchvision=0.25.0+cu130 | torchaudio=2.10.0+cu130 | numpy=2.4.2 | pandas=3.0.0 | cuda_build=13.0 | torch_cuda_built=True | amp_available=True | compile_available=True | triton_available=False
+2026-04-07 15:44:05 | INFO | SYSTEM  | 设备环境 | requested_device=cpu | selected_device=cpu | cuda_available=False | device_count=0 | gpus=[] | nvidia_smi=Failed to initialize NVML: GPU access blocked by the operating system Failed to properly shut down NVML: GPU access blocked by the operating system | device_nodes=[] | deterministic=False | cudnn_benchmark=False | tf32_matmul=False | tf32_cudnn=False | matmul_precision=default
+2026-04-07 15:44:05 | WARNING | SYSTEM  | CUDA 诊断 | 当前会话未检测到可供 torch 使用的 NVIDIA 驱动或设备。
+2026-04-07 15:44:06 | INFO | SYSTEM  | 数据检查 | split=train | matched=5491 | missing_image=0 | missing_csv=0 | missing_roi=0 | duplicate_csv=0 | duplicate_image=0 | duplicate_roi=0 | unreadable=0
+2026-04-07 15:44:06 | INFO | SYSTEM  | 数据检查 | split=val | matched=713 | missing_image=0 | missing_csv=0 | missing_roi=0 | duplicate_csv=0 | duplicate_image=0 | duplicate_roi=0 | unreadable=0
+2026-04-07 15:44:06 | INFO | SYSTEM  | 数据检查 | split=test | matched=79 | missing_image=0 | missing_csv=0 | missing_roi=0 | duplicate_csv=0 | duplicate_image=0 | duplicate_roi=0 | unreadable=0
+2026-04-07 15:44:06 | INFO | SYSTEM  | Image normalization | source=auto_train_stats(cache) | mean=0.58058435 | std=0.32301837 | cache=dataset/train_mean_std.json
+2026-04-07 15:44:06 | INFO | SYSTEM  | 图像输入 | loader=cv2.IMREAD_GRAYSCALE | channels=1
+2026-04-07 15:44:06 | INFO | SYSTEM  | 数据摘要 | split=train | matched=5491 | used=4 | csv_columns=['ID', 'Male', 'Boneage', 'Chronological'] | sex_field=Male | chronological_field=Chronological | boneage_field=Boneage | image_ext=['.png'] | missing_target_in_used=0 | chronological_range={'min': 10.0, 'max': 242.0} | boneage_range={'min': 12.0, 'max': 228.0}
+2026-04-07 15:44:06 | INFO | SYSTEM  | 数据摘要 | split=val | matched=713 | used=4 | csv_columns=['ID', 'Male', 'Boneage', 'Chronological'] | sex_field=Male | chronological_field=Chronological | boneage_field=Boneage | image_ext=['.png'] | missing_target_in_used=0 | chronological_range={'min': 11.0, 'max': 265.0} | boneage_range={'min': 12.0, 'max': 228.0}
+2026-04-07 15:44:06 | INFO | SYSTEM  | 数据摘要 | split=test | matched=79 | used=4 | csv_columns=['ID', 'Male', 'Chronological'] | sex_field=Male | chronological_field=Chronological | boneage_field=None | image_ext=['.png'] | missing_target_in_used=4 | chronological_range={'min': 29.0, 'max': 201.0} | boneage_range=None
+2026-04-07 15:44:06 | INFO | SYSTEM  | CONFIG SUMMARY:
+2026-04-07 15:44:06 | INFO | SYSTEM  | - model type: EnsembleBoneAgeModel(resnet18 + efficientnet_b0)
+2026-04-07 15:44:06 | INFO | SYSTEM  | - metadata mode: mlp
+2026-04-07 15:44:06 | INFO | SYSTEM  | - structure switches: ensemble=ensemble | branch=global_local | local_mode=patch_heatmap | target=relative | metadata=True(mlp) | heatmap_guidance=True | cbam=True[g=True,l=True]
+2026-04-07 15:44:06 | INFO | SYSTEM  | - backbones: resnet=resnet18 | efficientnet=efficientnet_b0 | pretrained=False
+2026-04-07 15:44:06 | INFO | SYSTEM  | - input modalities: grayscale_global_image, global_roi_heatmap, local_patches, local_heatmaps, roi_geometry_vector, male, chronological
+2026-04-07 15:44:06 | INFO | SYSTEM  | - target type: relative_age = Boneage - Chronological -> final_boneage = Chronological + predicted_relative_age
+2026-04-07 15:44:06 | INFO | SYSTEM  | - data strategy: input_size=384 | local_patch=96 | crop=bbox | crop_margin=0.0800 | sigma_ratio=0.0350 | sigma_min=8.00
+2026-04-07 15:44:06 | INFO | SYSTEM  | - optimization: epochs=1 | batch=2 | grad_accum=1 | optimizer=adamw | lr=0.00025 | weight_decay=0.0005 | scheduler=cosine[factor=0.500,patience=2] | warmup_epochs=3 | amp=False | compile=True(mode=reduce-overhead) | loss=smoothl1(beta=0.5) | best_metric=mae
+2026-04-07 15:44:06 | INFO | SYSTEM  | - augmentation: affine_p=0.65 | flip=False(p=0.50) | noise=False(p=0.12) | blur=False(p=0.08)
+2026-04-07 15:44:06 | INFO | SYSTEM  | - dataset size: {'train': 4, 'val': 4, 'test': 4}
+2026-04-07 15:44:06 | INFO | SYSTEM  | - device: cpu
+2026-04-07 15:44:06 | INFO | SYSTEM  | - image normalization: source=auto_train_stats(cache) mean=0.58058435 std=0.32301837
+2026-04-07 15:44:06 | INFO | SYSTEM  | DataLoader | num_workers=0 | pin_memory=False | persistent_workers=False | prefetch_factor=None
+2026-04-07 15:44:06 | INFO | SYSTEM  | 设备自检 | model_device=cpu | selected_device=cpu
+2026-04-07 15:44:06 | INFO | SYSTEM  | torch.compile requested: True
+2026-04-07 15:44:06 | INFO | SYSTEM  | torch.compile available: True
+2026-04-07 15:44:07 | INFO | SYSTEM  | torch.compile actually used: True
+2026-04-07 15:44:07 | INFO | SYSTEM  | torch.compile details: mode=reduce-overhead | cudagraphs=None | disabled_features=none | safety_downgrade=False | options_override=False
+2026-04-07 15:44:07 | INFO | SYSTEM  | Effective params | mode=enhanced | device=cpu | epochs=1 | batch_size=2 | effective_batch_size=2 | optimizer=adamw | lr=0.00025 | weight_decay=0.0005 | scheduler=cosine[factor=0.500,patience=2] | warmup_epochs=0 | amp=False->False | compile=True/True/True(mode=reduce-overhead) | channels_last=False | eval_interval=1 | early_stopping_patience=8 | num_workers=0 | pin_memory=False | persistent_workers=False | prefetch_factor=None | verify_images=False | ensemble=ensemble | branch=global_local | local_mode=patch_heatmap | metadata=True(mlp) | heatmap_guidance=True | cbam=True[g=True,l=True] | input_size=384 | local_patch_size=96 | crop=bbox(margin=0.080) | sigma=(0.0350,8.00) | target_type=relative_age = Boneage - Chronological -> final_boneage = Chronological + predicted_relative_age | normalization=(0.58058435,0.32301837,auto_train_stats(cache)) | dataset_sizes={'train': 4, 'val': 4, 'test': 4}
+2026-04-07 15:44:07 | INFO | SYSTEM  | Compile status | requested=True | available=True | used=True | mode=reduce-overhead | reason=n/a | cudagraphs=None | disabled_features=none | safety_downgrade=False | options_override=False
+2026-04-07 15:44:07 | INFO | SYSTEM  | ============================================================================================================
+2026-04-07 15:44:07 | INFO | SYSTEM  | Epoch 1/1 started
+2026-04-07 15:44:07 | INFO | SYSTEM  | Hyperparams | lr=0.00025 | train_batch_size=2 | effective_train_batch_size=2 | val_batch_size=2 | test_batch_size=2 | optimizer=adamw | scheduler=cosine | weight_decay=0.0005 | loss=smoothl1(beta=0.5) | device=cpu | amp=False | grad_accum=1 | grad_clip=1.0
+2026-04-07 15:44:07 | INFO | TRAIN   | Phase started | scope=1/1 | batches=2 | batch_size=2 | lr=0.00025 | device=cpu | amp=False | grad_accum=1 | channels_last=False
+2026-04-07 15:44:07 | INFO | TRAIN   | 正在等待首个 batch | scope=1/1 | 首次可能因数据预处理、DataLoader worker 启动和 torch.compile 预热而偏慢。
+2026-04-07 15:44:07 | INFO | TRAIN   | 首个 batch 已就绪 | phase=train | epoch=1 | wait_seconds=0.09
+2026-04-07 15:44:07 | INFO | TRAIN   | 首个 batch | phase=train | epoch=1 | model_device=cpu | global_image=cpu | local_images=cpu | global_heatmap=cpu | roi_vector=cpu
+2026-04-07 15:46:05 | INFO | TRAIN   | Phase finished | scope=1/1 | loss=0.5891 | final_mae=4.4921 | final_mad=4.3997 | relative_mae=4.4921 | relative_mad=4.3997 | phase_time=123.88s | data_time=0.21s | transfer_time=0.00s | compute_time=123.67s | samples_per_sec=0.03 | avg_batch_time=61.84s | min_batch_time=1.44s | max_batch_time=122.23s | gpu_peak_alloc=n/a | gpu_peak_reserved=n/a | optimizer_steps=2
+2026-04-07 15:46:05 | INFO | EVAL    | Phase started | scope=1/1 | batches=2 | batch_size=2 | lr=0.00025 | device=cpu | amp=False | grad_accum=1 | channels_last=False
+2026-04-07 15:46:05 | INFO | EVAL    | 正在等待首个 batch | scope=1/1 | 首次可能因数据预处理、DataLoader worker 启动和 torch.compile 预热而偏慢。
+2026-04-07 15:46:05 | INFO | EVAL    | 首个 batch 已就绪 | phase=eval | epoch=1 | wait_seconds=0.09
+2026-04-07 15:46:05 | INFO | EVAL    | 首个 batch | phase=eval | epoch=1 | model_device=cpu | global_image=cpu | local_images=cpu | global_heatmap=cpu | roi_vector=cpu
+2026-04-07 15:46:39 | INFO | EVAL    | Phase finished | scope=1/1 | loss=0.4346 | final_mae=3.4870 | final_mad=3.4797 | relative_mae=3.4870 | relative_mad=3.4797 | phase_time=36.04s | data_time=0.16s | transfer_time=0.00s | compute_time=35.87s | samples_per_sec=0.11 | avg_batch_time=17.94s | min_batch_time=0.23s | max_batch_time=35.65s | gpu_peak_alloc=n/a | gpu_peak_reserved=n/a | optimizer_steps=0
+2026-04-07 15:46:39 | INFO | SYSTEM  | Learning rate updated | epoch=1/1 | scheduler=cosine | from=0.00025 | to=5e-06
+2026-04-07 15:46:40 | INFO | SYSTEM  | Best model updated | epoch=1/1 | metric=mae | value=3.4870 | path=outputs/compile_verify_cpu_train_20260407_154405/model/best_model.pt
+2026-04-07 15:46:40 | INFO | SYSTEM  | Checkpoint saved | kind=last | epoch=1/1 | path=outputs/compile_verify_cpu_train_20260407_154405/model/last_checkpoint.pt
+2026-04-07 15:46:40 | INFO | SYSTEM  | Epoch 1/1 finished | train_time=123.88s | eval_time=36.04s | epoch_total_time=160.42s | train_data_time=0.21s | eval_data_time=0.16s | train_transfer_time=0.00s | eval_transfer_time=0.00s | train_compute_time=123.67s | eval_compute_time=35.87s | train_samples_per_sec=0.03 | eval_samples_per_sec=0.11 | train_gpu_peak_alloc=n/a | eval_gpu_peak_alloc=n/a | train_gpu_peak_reserved=n/a | eval_gpu_peak_reserved=n/a | train_avg_batch_time=61.84s | eval_avg_batch_time=17.94s | train_fastest_batch=1.44s | train_slowest_batch=122.23s | eval_fastest_batch=0.23s | eval_slowest_batch=35.65s
+2026-04-07 15:46:40 | INFO | SYSTEM  | Epoch 1/1 metrics | train_loss=0.5891 | val_loss=0.4346 | train_final_mae=4.4921 | val_final_mae=3.4870 | train_relative_mae=4.4921 | val_relative_mae=3.4870 | train_final_mad=4.3997 | val_final_mad=3.4797 | lr_start=0.00025 | lr_end=5e-06 | epoch_time=00:02:40 | total_elapsed=00:02:42 | best_updated=True
+2026-04-07 15:46:40 | INFO | SYSTEM  | 开始加载最佳 checkpoint 并执行最终验证。
+2026-04-07 15:46:40 | INFO | EVAL    | Phase started | scope=best-val | batches=2 | batch_size=2 | lr=5e-06 | device=cpu | amp=False | grad_accum=1 | channels_last=False
+2026-04-07 15:46:40 | INFO | EVAL    | 正在等待首个 batch | scope=best-val | 首次可能因数据预处理、DataLoader worker 启动和 torch.compile 预热而偏慢。
+2026-04-07 15:46:40 | INFO | EVAL    | 首个 batch 已就绪 | phase=eval | epoch=None | wait_seconds=0.09
+2026-04-07 15:46:41 | INFO | EVAL    | Phase finished | scope=best-val | loss=0.4346 | final_mae=3.4870 | final_mad=3.4797 | relative_mae=3.4870 | relative_mad=3.4797 | phase_time=0.65s | data_time=0.16s | transfer_time=0.00s | compute_time=0.49s | samples_per_sec=6.15 | avg_batch_time=0.24s | min_batch_time=0.23s | max_batch_time=0.26s | gpu_peak_alloc=n/a | gpu_peak_reserved=n/a | optimizer_steps=0
+2026-04-07 15:46:41 | INFO | SYSTEM  | 开始执行 test 集评估。
+2026-04-07 15:46:41 | INFO | EVAL    | Phase started | scope=test | batches=2 | batch_size=2 | lr=5e-06 | device=cpu | amp=False | grad_accum=1 | channels_last=False
+2026-04-07 15:46:41 | INFO | EVAL    | 正在等待首个 batch | scope=test | 首次可能因数据预处理、DataLoader worker 启动和 torch.compile 预热而偏慢。
+2026-04-07 15:46:41 | INFO | EVAL    | 首个 batch 已就绪 | phase=eval | epoch=None | wait_seconds=0.11
+2026-04-07 15:46:41 | INFO | EVAL    | Phase finished | scope=test | loss=n/a | final_mae=n/a | final_mad=n/a | relative_mae=n/a | relative_mad=n/a | phase_time=0.79s | data_time=0.23s | transfer_time=0.00s | compute_time=0.56s | samples_per_sec=5.09 | avg_batch_time=0.28s | min_batch_time=0.27s | max_batch_time=0.29s | gpu_peak_alloc=n/a | gpu_peak_reserved=n/a | optimizer_steps=0
+2026-04-07 15:46:41 | INFO | SYSTEM  | 开始生成训练报告文件。
+2026-04-07 15:46:44 | INFO | SYSTEM  | 训练报告生成完成。
+2026-04-07 15:46:44 | INFO | SYSTEM  | 训练任务完成 | total_elapsed=00:02:46 | run_dir=outputs/compile_verify_cpu_train_20260407_154405 | best_checkpoint=outputs/compile_verify_cpu_train_20260407_154405/model/best_model.pt | last_checkpoint=outputs/compile_verify_cpu_train_20260407_154405/model/last_checkpoint.pt

@@ -80,6 +80,12 @@ def _format_memory(value: Any) -> str:
     return f"{float(value):.1f}MB"
 
 
+def _format_feature_list(features: list[str] | tuple[str, ...] | None) -> str:
+    if not features:
+        return "none"
+    return ", ".join(str(feature) for feature in features)
+
+
 def _resolve_log_interval(config: dict[str, Any]) -> int:
     raw_value = (config.get("training") or {}).get("log_interval", 20)
     if raw_value is None:
@@ -922,6 +928,9 @@ def _build_effective_params_payload(
     compile_actually_used = False
     compile_reason = "not attempted in this entry point" if compile_requested else "disabled by config"
     compile_cudagraphs = None
+    compile_disabled_features: list[str] = []
+    compile_safety_downgrade = False
+    compile_options_override = False
     if compile_info is not None:
         compile_requested = bool(getattr(compile_info, "requested", compile_requested))
         compile_available = bool(getattr(compile_info, "available", compile_available))
@@ -929,6 +938,9 @@ def _build_effective_params_payload(
         compile_reason = getattr(compile_info, "reason", compile_reason)
         compile_cudagraphs = getattr(compile_info, "cudagraphs_enabled", None)
         compile_mode = str(getattr(compile_info, "mode", compile_mode) or compile_mode)
+        compile_disabled_features = list(getattr(compile_info, "disabled_features", []) or [])
+        compile_safety_downgrade = bool(getattr(compile_info, "safety_downgrade", False))
+        compile_options_override = bool(getattr(compile_info, "options_override_used", False))
 
     return {
         "experiment_mode": str((config.get("experiment") or {}).get("mode") or "enhanced"),
@@ -962,6 +974,9 @@ def _build_effective_params_payload(
         "compile_reason": compile_reason,
         "compile_mode": compile_mode,
         "compile_cudagraphs": compile_cudagraphs,
+        "compile_disabled_features": compile_disabled_features,
+        "compile_safety_downgrade": compile_safety_downgrade,
+        "compile_options_override": compile_options_override,
         "eval_interval": _resolve_positive_int(training_cfg.get("eval_interval"), default=1),
         "save_interval": _resolve_positive_int(training_cfg.get("save_interval"), default=1),
         "early_stopping_patience": early_stop_patience,
@@ -1056,16 +1071,19 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         payload["dataset_sizes"],
         extra=_phase_extra("SYSTEM"),
     )
-    if payload.get("compile_reason"):
-        logger.info(
-            "Compile status | requested=%s | available=%s | used=%s | reason=%s | cudagraphs=%s",
-            payload["compile_requested"],
-            payload["compile_available"],
-            payload["compile_actually_used"],
-            payload["compile_reason"],
-            payload.get("compile_cudagraphs"),
-            extra=_phase_extra("SYSTEM"),
-        )
+    logger.info(
+        "Compile status | requested=%s | available=%s | used=%s | mode=%s | reason=%s | cudagraphs=%s | disabled_features=%s | safety_downgrade=%s | options_override=%s",
+        payload["compile_requested"],
+        payload["compile_available"],
+        payload["compile_actually_used"],
+        payload["compile_mode"],
+        payload.get("compile_reason") or "n/a",
+        payload.get("compile_cudagraphs"),
+        _format_feature_list(payload.get("compile_disabled_features")),
+        payload.get("compile_safety_downgrade"),
+        payload.get("compile_options_override"),
+        extra=_phase_extra("SYSTEM"),
+    )
 
 
 def _load_checkpoint_state(checkpoint_path: str | Path | None) -> dict[str, Any] | None:
