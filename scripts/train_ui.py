@@ -9,6 +9,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import traceback
 import tkinter as tk
 from dataclasses import dataclass
@@ -351,6 +352,15 @@ def _parse_value(raw: str) -> Any:
     return value
 
 
+def _format_elapsed_clock(seconds: float | None) -> str:
+    if seconds is None:
+        return "--:--:--"
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def _validate_ui_value(texts: UITextManager, dotted_key: str, value: Any) -> None:
     allowed = STRICT_OPTIONS.get(dotted_key)
     if allowed is None:
@@ -502,9 +512,11 @@ class TrainUI:
         self.config_path_var = tk.StringVar(value=config_path)
         self.language_var = tk.StringVar(value=self.texts.get_language())
         self.status_var = tk.StringVar(value=self.t("status.ready"))
+        self.elapsed_var = tk.StringVar(value=self.t("timer.idle"))
         self.advanced_visible_var = tk.BooleanVar(value=False)
         self._status_key = "status.ready"
         self._status_kwargs: dict[str, Any] = {}
+        self._elapsed_key = "timer.idle"
 
         self.field_bindings: dict[str, FieldBinding] = {}
         self.section_frames: dict[str, ttk.LabelFrame] = {}
@@ -517,6 +529,9 @@ class TrainUI:
         self.stop_requested = False
         self.training_thread: threading.Thread | None = None
         self.training_control = None
+        self.training_started_at: float | None = None
+        self._elapsed_after_id: str | None = None
+        self._last_elapsed_seconds: float | None = None
         self.log_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._log_flush_scheduled = False
         self._max_log_chars = 200_000
@@ -607,6 +622,8 @@ class TrainUI:
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.progress = ttk.Progressbar(bottom, mode="indeterminate", length=180)
         self.progress.pack(side=tk.RIGHT, padx=(8, 8))
+        self.elapsed_label = ttk.Label(bottom, textvariable=self.elapsed_var, width=22, anchor="e")
+        self.elapsed_label.pack(side=tk.RIGHT)
         self.run_button = ttk.Button(bottom, text=self.t("button.start_training"), command=self._start_training)
         self.run_button.pack(side=tk.RIGHT, padx=(8, 0))
         self.reset_defaults_button = ttk.Button(bottom, text=self.t("button.reset_defaults"), command=self._reset_to_defaults)
@@ -630,6 +647,7 @@ class TrainUI:
                 self.enqueue_output(self.t("log.window_close_stop_requested"))
                 self._request_stop_training()
             return
+        self._cancel_elapsed_updates()
         self._output_capture_enabled = False
         self._restore_output_redirects()
         self.root.destroy()
@@ -643,10 +661,24 @@ class TrainUI:
     def _render_status(self) -> None:
         self.status_var.set(self.t(self._status_key, **self._status_kwargs))
 
+    def _render_elapsed(self) -> None:
+        kwargs: dict[str, Any] = {}
+        if self._elapsed_key != "timer.idle" and self._last_elapsed_seconds is not None:
+            kwargs["elapsed"] = _format_elapsed_clock(self._last_elapsed_seconds)
+        self.elapsed_var.set(self.t(self._elapsed_key, **kwargs))
+
     def _set_status(self, key: str, **kwargs: Any) -> None:
         self._status_key = key
         self._status_kwargs = kwargs
         self._render_status()
+
+    def _set_elapsed_state(self, key: str, elapsed_seconds: float | None = None) -> None:
+        self._elapsed_key = key
+        if key == "timer.idle":
+            self._last_elapsed_seconds = None
+        elif elapsed_seconds is not None:
+            self._last_elapsed_seconds = max(0.0, float(elapsed_seconds))
+        self._render_elapsed()
 
     def _show_error(self, title_key: str, message_key: str, **kwargs: Any) -> None:
         messagebox.showerror(self.t(title_key), self.t(message_key, **kwargs))
@@ -671,6 +703,7 @@ class TrainUI:
         self._configure_run_button(running=self.running, stopping=self.stop_requested)
         self._refresh_language_selector()
         self._render_status()
+        self._render_elapsed()
         self._refresh_form_texts()
 
     def _field_description(self, dotted_key: str) -> str:
@@ -742,6 +775,39 @@ class TrainUI:
         self.output_text.configure(state=tk.NORMAL)
         self.output_text.delete("1.0", tk.END)
         self.output_text.configure(state=tk.DISABLED)
+
+    def _cancel_elapsed_updates(self) -> None:
+        if self._elapsed_after_id is not None:
+            self.root.after_cancel(self._elapsed_after_id)
+            self._elapsed_after_id = None
+
+    def _refresh_training_elapsed(self) -> None:
+        if not self.running or self.training_started_at is None:
+            self._elapsed_after_id = None
+            return
+        self._last_elapsed_seconds = max(0.0, time.perf_counter() - self.training_started_at)
+        self._elapsed_key = "timer.running"
+        self._render_elapsed()
+        self._elapsed_after_id = self.root.after(500, self._refresh_training_elapsed)
+
+    def _begin_training_elapsed(self, started_at: float) -> None:
+        self.training_started_at = float(started_at)
+        self._last_elapsed_seconds = 0.0
+        self._cancel_elapsed_updates()
+        self._set_elapsed_state("timer.running", 0.0)
+        self._elapsed_after_id = self.root.after(500, self._refresh_training_elapsed)
+
+    def _finish_training_elapsed(self, state_key: str, elapsed_seconds: float | None = None) -> str:
+        if elapsed_seconds is None:
+            if self.training_started_at is not None:
+                elapsed_seconds = time.perf_counter() - self.training_started_at
+            else:
+                elapsed_seconds = self._last_elapsed_seconds or 0.0
+        elapsed_seconds = max(0.0, float(elapsed_seconds))
+        self._cancel_elapsed_updates()
+        self.training_started_at = None
+        self._set_elapsed_state(state_key, elapsed_seconds)
+        return _format_elapsed_clock(elapsed_seconds)
 
     def _log_control_message(self, message: str, level: str = "info") -> None:
         logger = logging.getLogger("rhpe_boneage")
@@ -1178,23 +1244,28 @@ class TrainUI:
         self.stop_requested = False
         self.training_thread = None
         self.training_control = None
+        self.training_started_at = None
+        self._cancel_elapsed_updates()
 
     def _handle_training_stopped(self, stop_text: str) -> None:
+        elapsed_text = self._finish_training_elapsed("timer.stopped")
         self._reset_training_runtime()
-        self._set_running(False, "status.training_stopped")
-        self.enqueue_output(self.t("log.training_stopped", reason=stop_text))
+        self._set_running(False, "status.training_stopped", elapsed=elapsed_text)
+        self.enqueue_output(self.t("log.training_stopped", reason=stop_text, elapsed=elapsed_text))
 
-    def _handle_training_success(self, run_dir: str) -> None:
+    def _handle_training_success(self, run_dir: str, elapsed_seconds: float | None = None) -> None:
+        elapsed_text = self._finish_training_elapsed("timer.finished", elapsed_seconds)
         self._reset_training_runtime()
-        self._set_running(False, "status.training_finished", run_dir=run_dir)
-        self.enqueue_output(self.t("log.training_finished", run_dir=run_dir))
-        self._show_info("dialog.training_complete_title", "dialog.training_complete_detail", run_dir=run_dir)
+        self._set_running(False, "status.training_finished", run_dir=run_dir, elapsed=elapsed_text)
+        self.enqueue_output(self.t("log.training_finished", run_dir=run_dir, elapsed=elapsed_text))
+        self._show_info("dialog.training_complete_title", "dialog.training_complete_detail", run_dir=run_dir, elapsed=elapsed_text)
 
     def _handle_training_error(self, error_text: str) -> None:
+        elapsed_text = self._finish_training_elapsed("timer.failed")
         self._reset_training_runtime()
-        self._set_running(False, "status.training_failed")
-        self.enqueue_output(self.t("log.training_failed", error=error_text))
-        self._show_error_text("dialog.training_failed_title", error_text)
+        self._set_running(False, "status.training_failed", elapsed=elapsed_text)
+        self.enqueue_output(self.t("log.training_failed", error=error_text, elapsed=elapsed_text))
+        self._show_error_text("dialog.training_failed_title", f"{error_text}\n{self.t('timer.failed', elapsed=elapsed_text)}")
 
     def _request_stop_training(self) -> None:
         if not self.running or self.training_control is None or self.stop_requested:
@@ -1205,7 +1276,10 @@ class TrainUI:
         self._set_status("status.stop_requested")
         self._configure_run_button(running=True, stopping=True)
         stop_scope = scope or "n/a"
-        message = self.t("log.user_stop_requested", phase=phase, scope=stop_scope)
+        elapsed_text = _format_elapsed_clock(
+            (time.perf_counter() - self.training_started_at) if self.training_started_at is not None else self._last_elapsed_seconds
+        )
+        message = self.t("log.user_stop_requested", phase=phase, scope=stop_scope, elapsed=elapsed_text)
         self.enqueue_output(message)
         self._log_control_message(message, level="warning")
 
@@ -1224,7 +1298,10 @@ class TrainUI:
         from rhpe_boneage.training.control import TrainingCancelledError, TrainingControl
 
         self.training_control = TrainingControl()
+        started_at = time.perf_counter()
+        self.training_control.set_run_started_at(started_at)
         self.stop_requested = False
+        self._begin_training_elapsed(started_at)
         self._set_running(True, "status.training_starting")
         self.enqueue_output(
             self.t(
@@ -1248,7 +1325,8 @@ class TrainUI:
                     control=self.training_control,
                 )
                 run_dir = result.get("run_dir", "")
-                self.root.after(0, self._handle_training_success, run_dir)
+                elapsed_seconds = result.get("total_elapsed_seconds")
+                self.root.after(0, self._handle_training_success, run_dir, elapsed_seconds)
             except TrainingCancelledError as exc:
                 self.root.after(0, self._handle_training_stopped, str(exc))
             except Exception as exc:

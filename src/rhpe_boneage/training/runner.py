@@ -48,6 +48,15 @@ def _format_seconds(seconds: float | None) -> str:
     return f"{seconds:.2f}s"
 
 
+def _format_duration_clock(seconds: float | None) -> str:
+    if seconds is None:
+        return "n/a"
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def _format_scalar(value: Any, precision: int = 4) -> str:
     if value is None:
         return "n/a"
@@ -172,6 +181,17 @@ def _resolve_runtime_settings(config: dict[str, Any]) -> tuple[str, bool, bool]:
     allow_cpu_fallback = bool(runtime_cfg.get("allow_cpu_fallback", False))
     deterministic = bool(runtime_cfg.get("deterministic", False))
     return requested_device, allow_cpu_fallback, deterministic
+
+
+def _resolve_training_started_at(control: TrainingControl | None) -> tuple[float, str]:
+    if control is not None:
+        started_at = control.get_run_started_at()
+        if started_at is not None:
+            return started_at, "ui"
+        started_at = time.perf_counter()
+        control.set_run_started_at(started_at)
+        return started_at, "runner"
+    return time.perf_counter(), "runner"
 
 
 def _worker_init_fn(worker_id: int) -> None:
@@ -420,7 +440,7 @@ def _log_epoch_header(
     logger.info("%s", "=" * 108, extra=_phase_extra("SYSTEM"))
     logger.info("Epoch %d/%d started", epoch, total_epochs, extra=_phase_extra("SYSTEM"))
     logger.info(
-        "Hyperparams | lr=%s | train_batch_size=%s | effective_train_batch_size=%s | val_batch_size=%s | test_batch_size=%s | optimizer=%s | scheduler=%s | weight_decay=%s | loss=%s | device=%s | amp=%s | grad_accum=%s | grad_clip=%s | log_interval=%s",
+        "Hyperparams | lr=%s | train_batch_size=%s | effective_train_batch_size=%s | val_batch_size=%s | test_batch_size=%s | optimizer=%s | scheduler=%s | weight_decay=%s | loss=%s | device=%s | amp=%s | grad_accum=%s | grad_clip=%s",
         _format_lr(optimizer.param_groups[0]["lr"]),
         training_cfg["batch_size"],
         effective_batch_size,
@@ -434,7 +454,6 @@ def _log_epoch_header(
         use_amp,
         grad_accum_steps,
         training_cfg.get("gradient_clip"),
-        log_interval,
         extra=_phase_extra("SYSTEM"),
     )
 
@@ -515,10 +534,13 @@ def _log_epoch_metrics(
     lr_start: float,
     lr_end: float,
     eval_ran: bool,
+    epoch_time_seconds: float,
+    total_elapsed_seconds: float,
+    best_updated: bool,
 ) -> None:
     if not eval_ran or val_metrics is None:
         logger.info(
-            "Epoch %d/%d metrics | train_loss=%s | train_final_mae=%s | train_relative_mae=%s | train_final_mad=%s | train_relative_mad=%s | lr_start=%s | lr_end=%s | validation=skipped",
+            "Epoch %d/%d metrics | train_loss=%s | train_final_mae=%s | train_relative_mae=%s | train_final_mad=%s | train_relative_mad=%s | lr_start=%s | lr_end=%s | epoch_time=%s | total_elapsed=%s | best_updated=%s | validation=skipped",
             epoch,
             total_epochs,
             _format_scalar(train_metrics.get("loss")),
@@ -528,11 +550,14 @@ def _log_epoch_metrics(
             _format_scalar(train_metrics.get("relative_mad")),
             _format_lr(lr_start),
             _format_lr(lr_end),
+            _format_duration_clock(epoch_time_seconds),
+            _format_duration_clock(total_elapsed_seconds),
+            best_updated,
             extra=_phase_extra("SYSTEM"),
         )
         return
     logger.info(
-        "Epoch %d/%d metrics | train_loss=%s | val_loss=%s | train_final_mae=%s | val_final_mae=%s | train_relative_mae=%s | val_relative_mae=%s | train_final_mad=%s | val_final_mad=%s | lr_start=%s | lr_end=%s",
+        "Epoch %d/%d metrics | train_loss=%s | val_loss=%s | train_final_mae=%s | val_final_mae=%s | train_relative_mae=%s | val_relative_mae=%s | train_final_mad=%s | val_final_mad=%s | lr_start=%s | lr_end=%s | epoch_time=%s | total_elapsed=%s | best_updated=%s",
         epoch,
         total_epochs,
         _format_scalar(train_metrics.get("loss")),
@@ -545,6 +570,27 @@ def _log_epoch_metrics(
         _format_scalar(val_metrics.get("final_mad")),
         _format_lr(lr_start),
         _format_lr(lr_end),
+        _format_duration_clock(epoch_time_seconds),
+        _format_duration_clock(total_elapsed_seconds),
+        best_updated,
+        extra=_phase_extra("SYSTEM"),
+    )
+
+
+def _log_checkpoint_saved(
+    logger,
+    *,
+    label: str,
+    checkpoint_path: Path,
+    epoch: int,
+    total_epochs: int,
+) -> None:
+    logger.info(
+        "Checkpoint saved | kind=%s | epoch=%d/%d | path=%s",
+        label,
+        epoch,
+        total_epochs,
+        checkpoint_path,
         extra=_phase_extra("SYSTEM"),
     )
 
@@ -1405,6 +1451,7 @@ def train_main(
     run_dir = _prepare_run_dir(config, purpose="train")
     artifact_dirs = _prepare_artifact_dirs(run_dir)
     logger = setup_logger(run_dir)
+    training_started_at, training_timer_source = _resolve_training_started_at(control)
     if control is not None:
         control.update_phase("system", "initializing")
         control.reset_stop_logged()
@@ -1412,7 +1459,13 @@ def train_main(
     seed_everything(int(config["experiment"]["seed"]), deterministic=deterministic)
 
     try:
-        logger.info("训练任务开始 | run_dir=%s", run_dir, extra=_phase_extra("SYSTEM"))
+        logger.info(
+            "训练任务开始 | run_dir=%s | timer_source=%s | elapsed=%s",
+            run_dir,
+            training_timer_source,
+            _format_duration_clock(time.perf_counter() - training_started_at),
+            extra=_phase_extra("SYSTEM"),
+        )
         _log_running_mode(logger, config)
         raise_if_stop_requested(control, logger, phase="system", scope="initializing", checkpoint="before_runtime_setup")
 
@@ -1589,8 +1642,10 @@ def train_main(
             _log_learning_rate_update(logger, scheduler_label, epoch, total_epochs, previous_lr, current_lr)
 
             current_metric = val_metrics[best_metric_name] if val_metrics is not None else None
+            best_updated = False
             if run_validation and _metric_improved(current_metric, best_metric, early_stop_min_delta):
                 best_metric = current_metric
+                best_updated = True
                 epochs_without_improvement = 0
                 _save_checkpoint(
                     best_checkpoint_path,
@@ -1628,6 +1683,16 @@ def train_main(
                     config=config,
                     normalizers=normalizers,
                 )
+                _log_checkpoint_saved(
+                    logger,
+                    label="last",
+                    checkpoint_path=last_checkpoint_path,
+                    epoch=epoch,
+                    total_epochs=total_epochs,
+                )
+
+            epoch_total_time = time.perf_counter() - epoch_started
+            total_elapsed_seconds = time.perf_counter() - training_started_at
 
             history_row = {
                 "epoch": epoch,
@@ -1648,6 +1713,9 @@ def train_main(
                 "lr_start": lr_start,
                 "lr_end": current_lr,
                 "eval_ran": run_validation,
+                "epoch_time_seconds": epoch_total_time,
+                "total_elapsed_seconds": total_elapsed_seconds,
+                "best_updated": best_updated,
             }
             history_rows.append(history_row)
             pd.DataFrame(history_rows).to_csv(run_dir / "history.csv", index=False)
@@ -1658,7 +1726,7 @@ def train_main(
                 total_epochs=total_epochs,
                 train_stats=train_stats,
                 eval_stats=val_stats,
-                epoch_total_time=time.perf_counter() - epoch_started,
+                epoch_total_time=epoch_total_time,
             )
             _log_epoch_metrics(
                 logger=logger,
@@ -1669,6 +1737,9 @@ def train_main(
                 lr_start=lr_start,
                 lr_end=current_lr,
                 eval_ran=run_validation,
+                epoch_time_seconds=epoch_total_time,
+                total_elapsed_seconds=total_elapsed_seconds,
+                best_updated=best_updated,
             )
             if run_validation and early_stop_patience > 0 and epochs_without_improvement >= early_stop_patience:
                 _save_checkpoint(
@@ -1681,6 +1752,13 @@ def train_main(
                     best_metric=best_metric,
                     config=config,
                     normalizers=normalizers,
+                )
+                _log_checkpoint_saved(
+                    logger,
+                    label="last(early-stop)",
+                    checkpoint_path=last_checkpoint_path,
+                    epoch=epoch,
+                    total_epochs=total_epochs,
                 )
                 logger.info(
                     "Early stopping triggered | epoch=%d/%d | patience=%d | min_delta=%s | best_%s=%s",
@@ -1709,6 +1787,13 @@ def train_main(
                 best_metric=best_metric,
                 config=config,
                 normalizers=normalizers,
+            )
+            _log_checkpoint_saved(
+                logger,
+                label="best(fallback)",
+                checkpoint_path=best_checkpoint_path,
+                epoch=fallback_epoch,
+                total_epochs=total_epochs,
             )
 
         raise_if_stop_requested(control, logger, phase="system", scope="best-val", checkpoint="before_best_val")
@@ -1796,14 +1881,35 @@ def train_main(
         except Exception as exc:
             logger.exception("论文结果文件生成失败。")
             raise RuntimeError(f"训练已完成，但论文结果文件生成失败: {exc}") from exc
+        total_elapsed_seconds = time.perf_counter() - training_started_at
+        logger.info(
+            "训练任务完成 | total_elapsed=%s | run_dir=%s | best_checkpoint=%s | last_checkpoint=%s",
+            _format_duration_clock(total_elapsed_seconds),
+            run_dir,
+            best_checkpoint_path,
+            last_checkpoint_path,
+            extra=_phase_extra("SYSTEM"),
+        )
+        output["total_elapsed_seconds"] = total_elapsed_seconds
+        output["total_elapsed_text"] = _format_duration_clock(total_elapsed_seconds)
         return output
     except TrainingCancelledError as exc:
         logger.warning(
-            "训练已按请求停止 | phase=%s | scope=%s | checkpoint=%s",
+            "训练已按请求停止 | phase=%s | scope=%s | checkpoint=%s | elapsed=%s",
             exc.phase,
             exc.scope or "n/a",
             exc.checkpoint or "n/a",
+            _format_duration_clock(time.perf_counter() - training_started_at),
             extra=_phase_extra(exc.phase or "SYSTEM"),
+        )
+        if "device" in locals() and isinstance(device, torch.device) and device.type == "cuda":
+            torch.cuda.empty_cache()
+        raise
+    except Exception:
+        logger.exception(
+            "训练异常退出 | elapsed=%s",
+            _format_duration_clock(time.perf_counter() - training_started_at),
+            extra=_phase_extra("SYSTEM"),
         )
         if "device" in locals() and isinstance(device, torch.device) and device.type == "cuda":
             torch.cuda.empty_cache()

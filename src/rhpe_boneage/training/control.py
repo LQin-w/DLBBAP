@@ -24,6 +24,7 @@ class TrainingControl:
     _phase: str = "system"
     _scope: str = "idle"
     _stop_logged: bool = False
+    _run_started_at: float | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def request_stop(self) -> None:
@@ -31,6 +32,14 @@ class TrainingControl:
 
     def is_stop_requested(self) -> bool:
         return self.stop_event.is_set()
+
+    def set_run_started_at(self, started_at: float) -> None:
+        with self._lock:
+            self._run_started_at = float(started_at)
+
+    def get_run_started_at(self) -> float | None:
+        with self._lock:
+            return self._run_started_at
 
     def update_phase(self, phase: str, scope: str = "") -> None:
         with self._lock:
@@ -57,6 +66,7 @@ class TrainingControl:
             self._phase = "system"
             self._scope = "idle"
             self._stop_logged = False
+            self._run_started_at = None
         self.stop_event.clear()
 
 

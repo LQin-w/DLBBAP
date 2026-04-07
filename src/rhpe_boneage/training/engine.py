@@ -211,12 +211,6 @@ def _resolve_scope_label(epoch: int | None, total_epochs: int | None, progress_l
     return "n/a"
 
 
-def _should_log_batch(batch_number: int, total_batches: int, log_interval: int) -> bool:
-    if batch_number == 1 or batch_number == total_batches:
-        return True
-    return log_interval > 0 and (batch_number % log_interval == 0)
-
-
 def _cuda_memory_stats(device: torch.device) -> dict[str, float | None]:
     if device.type != "cuda":
         return {
@@ -479,33 +473,6 @@ def run_epoch(
                 min_batch_time = batch_time if min_batch_time is None else min(min_batch_time, batch_time)
                 max_batch_time = batch_time if max_batch_time is None else max(max_batch_time, batch_time)
 
-                if logger is not None and _should_log_batch(batch_number, total_batches, log_interval):
-                    phase_elapsed = time.perf_counter() - phase_started
-                    eta_seconds = 0.0
-                    if batch_number < total_batches and batch_number > 0:
-                        eta_seconds = (phase_elapsed / batch_number) * (total_batches - batch_number)
-                    current_loss = float(loss.detach().item()) if loss is not None else None
-                    current_lr = lr_override if lr_override is not None else (optimizer.param_groups[0]["lr"] if optimizer is not None else None)
-                    memory_stats = _cuda_memory_stats(device)
-                    samples_per_second = batch_size / max(batch_time, 1e-8)
-                    logger.info(
-                        "Scope %s | Batch %d/%d | loss=%s | lr=%s | batch_time=%s | data_time=%s | transfer_time=%s | compute_time=%s | samples_per_sec=%.2f | gpu_alloc=%s | gpu_peak_reserved=%s | elapsed=%s | eta=%s",
-                        scope_label,
-                        batch_number,
-                        total_batches,
-                        _format_loss_value(current_loss),
-                        _format_lr_value(current_lr),
-                        _format_seconds(batch_time),
-                        _format_seconds(data_wait_seconds),
-                        _format_seconds(transfer_time_seconds),
-                        _format_seconds(compute_time),
-                        samples_per_second,
-                        _format_memory_value(memory_stats["allocated_mb"]),
-                        _format_memory_value(memory_stats["max_reserved_mb"]),
-                        _format_seconds(phase_elapsed),
-                        _format_seconds(eta_seconds),
-                        extra={"phase": phase.upper()},
-                    )
                 next_batch_wait_started = time.perf_counter()
                 batch_index += 1
                 raise_if_stop_requested(

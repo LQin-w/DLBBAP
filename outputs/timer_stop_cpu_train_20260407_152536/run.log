@@ -1,0 +1,47 @@
+2026-04-07 15:25:36 | INFO | SYSTEM  | 训练任务开始 | run_dir=outputs/timer_stop_cpu_train_20260407_152536 | timer_source=ui | elapsed=00:00:00
+2026-04-07 15:25:36 | INFO | SYSTEM  | Running mode: enhanced (default)
+2026-04-07 15:25:36 | INFO | SYSTEM  | - SIMBA: partial
+2026-04-07 15:25:36 | INFO | SYSTEM  | - BoNet: partial
+2026-04-07 15:25:36 | INFO | SYSTEM  | Mode note: Engineering-enhanced multimodal framework.
+2026-04-07 15:25:36 | INFO | SYSTEM  | 运行环境 | python=3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0] | executable=/home/lqw/anaconda3/envs/MyBysj/bin/python | platform=Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39 | is_wsl=True | filesystem_encoding=utf-8 | preferred_encoding=UTF-8 | stdout_encoding=utf-8
+2026-04-07 15:25:36 | INFO | SYSTEM  | 依赖版本 | torch=2.10.0+cu130 | torchvision=0.25.0+cu130 | torchaudio=2.10.0+cu130 | numpy=2.4.2 | pandas=3.0.0 | cuda_build=13.0 | torch_cuda_built=True | amp_available=True | compile_available=True | triton_available=False
+2026-04-07 15:25:36 | INFO | SYSTEM  | 设备环境 | requested_device=cpu | selected_device=cpu | cuda_available=False | device_count=0 | gpus=[] | nvidia_smi=Failed to initialize NVML: GPU access blocked by the operating system Failed to properly shut down NVML: GPU access blocked by the operating system | device_nodes=[] | deterministic=False | cudnn_benchmark=False | tf32_matmul=False | tf32_cudnn=False | matmul_precision=default
+2026-04-07 15:25:36 | WARNING | SYSTEM  | CUDA 诊断 | 当前会话未检测到可供 torch 使用的 NVIDIA 驱动或设备。
+2026-04-07 15:25:37 | INFO | SYSTEM  | 数据检查 | split=train | matched=5491 | missing_image=0 | missing_csv=0 | missing_roi=0 | duplicate_csv=0 | duplicate_image=0 | duplicate_roi=0 | unreadable=0
+2026-04-07 15:25:37 | INFO | SYSTEM  | 数据检查 | split=val | matched=713 | missing_image=0 | missing_csv=0 | missing_roi=0 | duplicate_csv=0 | duplicate_image=0 | duplicate_roi=0 | unreadable=0
+2026-04-07 15:25:37 | INFO | SYSTEM  | 数据检查 | split=test | matched=79 | missing_image=0 | missing_csv=0 | missing_roi=0 | duplicate_csv=0 | duplicate_image=0 | duplicate_roi=0 | unreadable=0
+2026-04-07 15:25:37 | INFO | SYSTEM  | Image normalization | source=auto_train_stats(cache) | mean=0.58058435 | std=0.32301837 | cache=dataset/train_mean_std.json
+2026-04-07 15:25:37 | INFO | SYSTEM  | 图像输入 | loader=cv2.IMREAD_GRAYSCALE | channels=1
+2026-04-07 15:25:37 | INFO | SYSTEM  | 数据摘要 | split=train | matched=5491 | used=16 | csv_columns=['ID', 'Male', 'Boneage', 'Chronological'] | sex_field=Male | chronological_field=Chronological | boneage_field=Boneage | image_ext=['.png'] | missing_target_in_used=0 | chronological_range={'min': 10.0, 'max': 242.0} | boneage_range={'min': 12.0, 'max': 228.0}
+2026-04-07 15:25:37 | INFO | SYSTEM  | 数据摘要 | split=val | matched=713 | used=8 | csv_columns=['ID', 'Male', 'Boneage', 'Chronological'] | sex_field=Male | chronological_field=Chronological | boneage_field=Boneage | image_ext=['.png'] | missing_target_in_used=0 | chronological_range={'min': 11.0, 'max': 265.0} | boneage_range={'min': 12.0, 'max': 228.0}
+2026-04-07 15:25:37 | INFO | SYSTEM  | 数据摘要 | split=test | matched=79 | used=8 | csv_columns=['ID', 'Male', 'Chronological'] | sex_field=Male | chronological_field=Chronological | boneage_field=None | image_ext=['.png'] | missing_target_in_used=8 | chronological_range={'min': 29.0, 'max': 201.0} | boneage_range=None
+2026-04-07 15:25:37 | INFO | SYSTEM  | CONFIG SUMMARY:
+2026-04-07 15:25:37 | INFO | SYSTEM  | - model type: EnsembleBoneAgeModel(resnet18 + efficientnet_b0)
+2026-04-07 15:25:37 | INFO | SYSTEM  | - metadata mode: mlp
+2026-04-07 15:25:37 | INFO | SYSTEM  | - structure switches: ensemble=ensemble | branch=global_local | local_mode=patch_heatmap | target=relative | metadata=True(mlp) | heatmap_guidance=True | cbam=True[g=True,l=True]
+2026-04-07 15:25:37 | INFO | SYSTEM  | - backbones: resnet=resnet18 | efficientnet=efficientnet_b0 | pretrained=False
+2026-04-07 15:25:37 | INFO | SYSTEM  | - input modalities: grayscale_global_image, global_roi_heatmap, local_patches, local_heatmaps, roi_geometry_vector, male, chronological
+2026-04-07 15:25:37 | INFO | SYSTEM  | - target type: relative_age = Boneage - Chronological -> final_boneage = Chronological + predicted_relative_age
+2026-04-07 15:25:37 | INFO | SYSTEM  | - data strategy: input_size=384 | local_patch=96 | crop=bbox | crop_margin=0.0800 | sigma_ratio=0.0350 | sigma_min=8.00
+2026-04-07 15:25:37 | INFO | SYSTEM  | - optimization: epochs=5 | batch=4 | grad_accum=1 | optimizer=adamw | lr=0.00025 | weight_decay=0.0005 | scheduler=cosine[factor=0.500,patience=2] | warmup_epochs=3 | amp=False | compile=False(mode=reduce-overhead) | loss=smoothl1(beta=0.5) | best_metric=mae
+2026-04-07 15:25:37 | INFO | SYSTEM  | - augmentation: affine_p=0.65 | flip=False(p=0.50) | noise=False(p=0.12) | blur=False(p=0.08)
+2026-04-07 15:25:37 | INFO | SYSTEM  | - dataset size: {'train': 16, 'val': 8, 'test': 8}
+2026-04-07 15:25:37 | INFO | SYSTEM  | - device: cpu
+2026-04-07 15:25:37 | INFO | SYSTEM  | - image normalization: source=auto_train_stats(cache) mean=0.58058435 std=0.32301837
+2026-04-07 15:25:37 | INFO | SYSTEM  | DataLoader | num_workers=0 | pin_memory=False | persistent_workers=False | prefetch_factor=None
+2026-04-07 15:25:37 | INFO | SYSTEM  | 设备自检 | model_device=cpu | selected_device=cpu
+2026-04-07 15:25:37 | INFO | SYSTEM  | torch.compile requested: False
+2026-04-07 15:25:37 | INFO | SYSTEM  | torch.compile available: True
+2026-04-07 15:25:37 | INFO | SYSTEM  | torch.compile actually used: False
+2026-04-07 15:25:37 | INFO | SYSTEM  | torch.compile reason: disabled by config
+2026-04-07 15:25:37 | INFO | SYSTEM  | Effective params | mode=enhanced | device=cpu | epochs=5 | batch_size=4 | effective_batch_size=4 | optimizer=adamw | lr=0.00025 | weight_decay=0.0005 | scheduler=cosine[factor=0.500,patience=2] | warmup_epochs=3 | amp=False->False | compile=False/True/False(mode=reduce-overhead) | channels_last=False | eval_interval=1 | early_stopping_patience=8 | num_workers=0 | pin_memory=False | persistent_workers=False | prefetch_factor=None | verify_images=False | ensemble=ensemble | branch=global_local | local_mode=patch_heatmap | metadata=True(mlp) | heatmap_guidance=True | cbam=True[g=True,l=True] | input_size=384 | local_patch_size=96 | crop=bbox(margin=0.080) | sigma=(0.0350,8.00) | target_type=relative_age = Boneage - Chronological -> final_boneage = Chronological + predicted_relative_age | normalization=(0.58058435,0.32301837,auto_train_stats(cache)) | dataset_sizes={'train': 16, 'val': 8, 'test': 8}
+2026-04-07 15:25:37 | INFO | SYSTEM  | Compile status | requested=False | available=True | used=False | reason=disabled by config | cudagraphs=None
+2026-04-07 15:25:37 | INFO | SYSTEM  | ============================================================================================================
+2026-04-07 15:25:37 | INFO | SYSTEM  | Epoch 1/5 started
+2026-04-07 15:25:37 | INFO | SYSTEM  | Hyperparams | lr=0.000116667 | train_batch_size=4 | effective_train_batch_size=4 | val_batch_size=4 | test_batch_size=4 | optimizer=adamw | scheduler=cosine | weight_decay=0.0005 | loss=smoothl1(beta=0.5) | device=cpu | amp=False | grad_accum=1 | grad_clip=1.0
+2026-04-07 15:25:37 | INFO | TRAIN   | Phase started | scope=1/5 | batches=4 | batch_size=4 | lr=0.000116667 | device=cpu | amp=False | grad_accum=1 | channels_last=False
+2026-04-07 15:25:37 | INFO | TRAIN   | 正在等待首个 batch | scope=1/5 | 首次可能因数据预处理、DataLoader worker 启动和 torch.compile 预热而偏慢。
+2026-04-07 15:25:37 | INFO | TRAIN   | 首个 batch 已就绪 | phase=train | epoch=1 | wait_seconds=0.20
+2026-04-07 15:25:37 | INFO | TRAIN   | 首个 batch | phase=train | epoch=1 | model_device=cpu | global_image=cpu | local_images=cpu | global_heatmap=cpu | roi_vector=cpu
+2026-04-07 15:25:44 | WARNING | TRAIN   | 检测到停止请求 | phase=train | scope=1/5 | checkpoint=after_batch
+2026-04-07 15:25:44 | WARNING | TRAIN   | 训练已按请求停止 | phase=train | scope=1/5 | checkpoint=after_batch | elapsed=00:00:07
