@@ -582,7 +582,7 @@ class TrainUI:
         self._update_resume_mode_text()
         self._install_output_redirects()
         self.root.protocol("WM_DELETE_WINDOW", self._handle_close)
-        self._load_config_into_form(config_path)
+        self._load_config_into_form(config_path, prompt_resume_selection=True)
         if self.tk_system_encoding:
             self.enqueue_output(self.t("log.tk_encoding", encoding=self.tk_system_encoding))
         if self.font_info["ui_family"]:
@@ -944,25 +944,16 @@ class TrainUI:
         if not selected:
             return
         self.config_path_var.set(selected)
-        self._load_config_into_form(selected)
+        self._load_config_into_form(selected, prompt_resume_selection=True)
 
     def _choose_resume_checkpoint(self) -> None:
-        selected = filedialog.askopenfilename(
-            title=self.t("file_dialog.select_resume"),
-            filetypes=[
-                (self.t("filetype.checkpoint"), "*.pt *.pth *.ckpt"),
-                (self.t("filetype.all"), "*.*"),
-            ],
-        )
-        if not selected:
-            return
-        self._set_resume_checkpoint(selected, status_key="status.resume_selected")
+        self._prompt_resume_checkpoint_selection(self.config_path_var.get().strip())
 
     def _clear_resume_checkpoint(self) -> None:
         self._set_resume_checkpoint(None, status_key="status.resume_cleared")
 
     def _reload_current_config(self) -> None:
-        self._load_config_into_form(self.config_path_var.get().strip())
+        self._load_config_into_form(self.config_path_var.get().strip(), prompt_resume_selection=True)
 
     def _clear_form(self) -> None:
         for child in self.form_frame.winfo_children():
@@ -1293,7 +1284,34 @@ class TrainUI:
         self._load_config_into_form(str(path))
         self._set_status("status.config_saved", path=path)
 
-    def _load_config_into_form(self, config_path: str) -> None:
+    def _prompt_resume_checkpoint_selection(self, config_path: str) -> None:
+        current_resume = self._get_resume_checkpoint_value()
+        initialdir = ""
+        initialfile = ""
+        if current_resume:
+            current_resume_path = Path(current_resume)
+            initialfile = current_resume_path.name
+            if current_resume_path.parent.exists():
+                initialdir = str(current_resume_path.parent)
+        if not initialdir:
+            config_parent = Path(config_path).resolve().parent
+            if config_parent.exists():
+                initialdir = str(config_parent)
+
+        selected = filedialog.askopenfilename(
+            title=self.t("file_dialog.select_resume"),
+            initialdir=initialdir or None,
+            initialfile=initialfile or None,
+            filetypes=[
+                (self.t("filetype.checkpoint"), "*.pt *.pth *.ckpt"),
+                (self.t("filetype.all"), "*.*"),
+            ],
+        )
+        if not selected:
+            return
+        self._set_resume_checkpoint(selected, status_key="status.resume_selected")
+
+    def _load_config_into_form(self, config_path: str, *, prompt_resume_selection: bool = False) -> None:
         path = Path(config_path)
         if not path.exists():
             self._show_error("dialog.config_not_found_title", "dialog.config_not_found_detail", path=path)
@@ -1332,6 +1350,8 @@ class TrainUI:
             default_count=added_from_default,
             hidden_count=hidden_count,
         )
+        if prompt_resume_selection:
+            self.root.after_idle(lambda path_str=str(path): self._prompt_resume_checkpoint_selection(path_str))
 
     def _reset_to_defaults(self) -> None:
         for spec in VISIBLE_FIELD_SPECS:
