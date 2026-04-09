@@ -1,0 +1,11 @@
+{
+  "loss": 0.369574112862056,
+  "final_mae": 7.4157514572143555,
+  "final_mad": 5.890625,
+  "relative_mae": 7.4157514572143555,
+  "relative_mad": 5.890625,
+  "mae": 7.4157514572143555,
+  "mad": 5.890625,
+  "relative_age_error_corr": -0.09472778018944274,
+  "relative_age_error_slope": -0.0446935146020503
+}
