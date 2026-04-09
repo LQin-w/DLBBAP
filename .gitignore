@@ -3,3 +3,5 @@
 /dataset/
 /outputs/*/model/
 log.txt
+scripts/__pycache__
+src/rhpe_boneage/__pycache__
