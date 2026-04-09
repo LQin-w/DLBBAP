@@ -582,7 +582,7 @@ class TrainUI:
         self._update_resume_mode_text()
         self._install_output_redirects()
         self.root.protocol("WM_DELETE_WINDOW", self._handle_close)
-        self._load_config_into_form(config_path, prompt_resume_selection=True)
+        self._load_config_into_form(config_path, prompt_resume_selection=False)
         if self.tk_system_encoding:
             self.enqueue_output(self.t("log.tk_encoding", encoding=self.tk_system_encoding))
         if self.font_info["ui_family"]:
@@ -953,7 +953,7 @@ class TrainUI:
         self._set_resume_checkpoint(None, status_key="status.resume_cleared")
 
     def _reload_current_config(self) -> None:
-        self._load_config_into_form(self.config_path_var.get().strip(), prompt_resume_selection=True)
+        self._load_config_into_form(self.config_path_var.get().strip(), prompt_resume_selection=False)
 
     def _clear_form(self) -> None:
         for child in self.form_frame.winfo_children():
