@@ -44,6 +44,8 @@ model:
   metadata:
     enabled: true
     mode: mlp
+    use_gender: true
+    use_chronological: true
     hidden_dim: 64
     gender_embedding_dim: 8
     chronological_hidden_dim: 16

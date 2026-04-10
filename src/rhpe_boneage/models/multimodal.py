@@ -14,15 +14,22 @@ from .local_branch import LocalBranch
 class IdentityMarkerMultipliers(nn.Module):
     """论文 SIMBA 中的可学习 identity multipliers。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, use_gender: bool, use_chronological: bool) -> None:
         super().__init__()
+        self.use_gender = use_gender
+        self.use_chronological = use_chronological
         self.gender_multiplier = nn.Parameter(torch.ones(1))
         self.chronological_multiplier = nn.Parameter(torch.ones(1))
 
     def forward(self, male: torch.Tensor, chronological: torch.Tensor) -> torch.Tensor:
-        gender_feature = male * self.gender_multiplier
-        chronological_feature = chronological * self.chronological_multiplier
-        return torch.cat([gender_feature, chronological_feature], dim=-1)
+        features = []
+        if self.use_gender:
+            features.append(male * self.gender_multiplier)
+        if self.use_chronological:
+            features.append(chronological * self.chronological_multiplier)
+        if not features:
+            raise ValueError("IdentityMarkerMultipliers 至少需要启用一种元信息输入。")
+        return torch.cat(features, dim=-1)
 
 
 class HeatmapGuidance(nn.Module):
@@ -58,28 +65,53 @@ class MetadataEncoder(nn.Module):
         self.mode = meta_cfg.get("mode", "simba_hybrid")
         self.use_mlp = self.mode in {"mlp", "simba_hybrid"}
         self.use_multiplier = self.mode in {"simba_multiplier", "simba_hybrid"}
+        self.use_gender = bool(meta_cfg.get("use_gender", True))
+        self.use_chronological = bool(meta_cfg.get("use_chronological", True))
         self.output_dim = 0
         if not self.enabled:
             return
+        if not (self.use_gender or self.use_chronological):
+            raise ValueError("model.metadata.enabled=true 时至少启用一种元信息输入。")
 
         if self.use_mlp:
-            gender_dim = int(meta_cfg["gender_embedding_dim"])
-            chrono_dim = int(meta_cfg["chronological_hidden_dim"])
-            self.gender_embedding = nn.Embedding(2, gender_dim)
-            self.chronological_proj = nn.Sequential(
-                nn.Linear(1, chrono_dim),
-                nn.ReLU(inplace=True),
-            )
+            mlp_input_dim = 0
+            if self.use_gender:
+                gender_dim = int(meta_cfg["gender_embedding_dim"])
+                self.gender_embedding = nn.Embedding(2, gender_dim)
+                mlp_input_dim += gender_dim
+            else:
+                self.gender_embedding = None
+            if self.use_chronological:
+                chrono_dim = int(meta_cfg["chronological_hidden_dim"])
+                self.chronological_proj = nn.Sequential(
+                    nn.Linear(1, chrono_dim),
+                    nn.ReLU(inplace=True),
+                )
+                mlp_input_dim += chrono_dim
+            else:
+                self.chronological_proj = None
             self.encoder = nn.Sequential(
-                nn.Linear(gender_dim + chrono_dim, int(meta_cfg["hidden_dim"])),
+                nn.Linear(mlp_input_dim, int(meta_cfg["hidden_dim"])),
                 nn.ReLU(inplace=True),
                 nn.Dropout(meta_cfg["dropout"]),
             )
             self.output_dim += int(meta_cfg["hidden_dim"])
+        else:
+            self.gender_embedding = None
+            self.chronological_proj = None
+            self.encoder = None
 
         if self.use_multiplier:
-            self.multipliers = IdentityMarkerMultipliers()
-            self.output_dim += 2
+            self.multipliers = IdentityMarkerMultipliers(
+                use_gender=self.use_gender,
+                use_chronological=self.use_chronological,
+            )
+            self.output_dim += int(self.use_gender) + int(self.use_chronological)
+        else:
+            self.multipliers = None
+
+        if self.output_dim <= 0:
+            raise ValueError(f"不支持的 model.metadata.mode={self.mode}，或当前元信息输入选择无法生成特征。")
 
     def forward(
         self,
@@ -94,9 +126,12 @@ class MetadataEncoder(nn.Module):
         if self.use_multiplier:
             features.append(self.multipliers(male, chronological))
         if self.use_mlp:
-            gender_feature = self.gender_embedding(male_index)
-            chronological_feature = self.chronological_proj(chronological_input)
-            features.append(self.encoder(torch.cat([gender_feature, chronological_feature], dim=-1)))
+            mlp_features = []
+            if self.use_gender:
+                mlp_features.append(self.gender_embedding(male_index))
+            if self.use_chronological:
+                mlp_features.append(self.chronological_proj(chronological_input))
+            features.append(self.encoder(torch.cat(mlp_features, dim=-1)))
         return torch.cat(features, dim=-1)
 
 

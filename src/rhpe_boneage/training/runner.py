@@ -254,13 +254,32 @@ def _log_running_mode(logger, config: dict[str, Any]) -> str:
     metadata_mode = str((config.get("model") or {}).get("metadata", {}).get("mode") or "mlp").lower()
     target_mode = str((config.get("model") or {}).get("target_mode") or "relative").lower()
     branch_mode = str((config.get("model") or {}).get("branch_mode") or "global_local").lower()
+    metadata_cfg = (config.get("model") or {}).get("metadata") or {}
+    metadata_enabled = bool(metadata_cfg.get("enabled", True))
+    use_gender = bool(metadata_cfg.get("use_gender", True))
+    use_chronological = bool(metadata_cfg.get("use_chronological", True))
+    if metadata_enabled and not (use_gender or use_chronological):
+        raise ValueError("model.metadata.enabled=true 时至少启用一种元信息输入。")
     if mode == "simba":
         if target_mode != "relative":
             logger.warning("experiment.mode=simba 但 model.target_mode=%s；这与 SIMBA 风格相对骨龄设定不一致。", target_mode)
+        if not metadata_enabled:
+            logger.warning("experiment.mode=simba 但 metadata 已关闭；这会弱化 SIMBA 的 identity marker 设计。")
         if metadata_mode == "mlp":
             logger.warning("experiment.mode=simba 但 model.metadata.mode=mlp；若要更贴近 SIMBA，请改为 simba_multiplier 或 simba_hybrid。")
-    if mode == "bonet_like" and branch_mode == "global_only":
-        logger.warning("experiment.mode=bonet_like 但 model.branch_mode=global_only；局部分支未启用，无法体现 ROI/keypoints/local patches。")
+        if not use_gender:
+            logger.warning("experiment.mode=simba 但未启用 gender metadata；这与 SIMBA 的 identity markers 不一致。")
+        if not use_chronological:
+            logger.warning("experiment.mode=simba 但未启用 chronological metadata；这会削弱 SIMBA 的相对骨龄设定。")
+    if mode == "bonet_like":
+        if branch_mode == "global_only":
+            logger.warning("experiment.mode=bonet_like 但 model.branch_mode=global_only；局部分支未启用，无法体现 ROI/keypoints/local patches。")
+        if target_mode != "direct":
+            logger.warning("experiment.mode=bonet_like 但 model.target_mode=%s；原始 BoNet 更接近直接骨龄回归。", target_mode)
+        if not metadata_enabled or not use_gender:
+            logger.warning("experiment.mode=bonet_like 但未保留 gender metadata；原始 BoNet 使用 gender 输入。")
+        if metadata_enabled and use_chronological:
+            logger.warning("experiment.mode=bonet_like 仍启用了 chronological metadata；这会引入更强的 SIMBA 风格 identity marker 偏向。")
     return mode
 
 
@@ -378,10 +397,30 @@ def _describe_target(config: dict[str, Any]) -> str:
     return "direct boneage regression"
 
 
+def _resolve_metadata_inputs(config: dict[str, Any]) -> tuple[bool, bool, bool]:
+    metadata_cfg = ((config.get("model") or {}).get("metadata") or {})
+    enabled = bool(metadata_cfg.get("enabled", True))
+    use_gender = bool(metadata_cfg.get("use_gender", True))
+    use_chronological = bool(metadata_cfg.get("use_chronological", True))
+    return enabled, use_gender, use_chronological
+
+
+def _describe_metadata_inputs(config: dict[str, Any]) -> str:
+    metadata_enabled, use_gender, use_chronological = _resolve_metadata_inputs(config)
+    if not metadata_enabled:
+        return "disabled"
+    selected = []
+    if use_gender:
+        selected.append("male")
+    if use_chronological:
+        selected.append("chronological")
+    return ", ".join(selected) if selected else "none"
+
+
 def _describe_input_modalities(config: dict[str, Any]) -> list[str]:
     model_cfg = config.get("model") or {}
     branch_mode = str(model_cfg.get("branch_mode") or "global_local").lower()
-    metadata_enabled = bool((model_cfg.get("metadata") or {}).get("enabled", True))
+    metadata_enabled, use_gender, use_chronological = _resolve_metadata_inputs(config)
     modalities = ["grayscale_global_image"]
     if bool((model_cfg.get("heatmap_guidance") or {}).get("enabled", False)):
         modalities.append("global_roi_heatmap")
@@ -393,7 +432,10 @@ def _describe_input_modalities(config: dict[str, Any]) -> list[str]:
             modalities.append("local_heatmaps")
         modalities.append("roi_geometry_vector")
     if metadata_enabled:
-        modalities.extend(["male", "chronological"])
+        if use_gender:
+            modalities.append("male")
+        if use_chronological:
+            modalities.append("chronological")
     return modalities
 
 
@@ -749,6 +791,7 @@ def _build_config_summary(
         "experiment_mode": str((config.get("experiment") or {}).get("mode") or "enhanced"),
         "model_type": _describe_model_type(config),
         "metadata_mode": str(metadata_cfg.get("mode") or "mlp"),
+        "metadata_inputs": _describe_metadata_inputs(config),
         "input_modalities": _describe_input_modalities(config),
         "target_type": _describe_target(config),
         "dataset_size": {split: len(dataset) for split, dataset in datasets.items()},
@@ -764,6 +807,8 @@ def _build_config_summary(
             "relative_target_direction": str(model_cfg.get("relative_target_direction") or "boneage_minus_chronological"),
             "metadata_enabled": bool(metadata_cfg.get("enabled", True)),
             "metadata_mode": str(metadata_cfg.get("mode") or "mlp"),
+            "metadata_use_gender": bool(metadata_cfg.get("use_gender", True)),
+            "metadata_use_chronological": bool(metadata_cfg.get("use_chronological", True)),
             "heatmap_guidance": bool(heatmap_guidance_cfg.get("enabled", False)),
             "cbam_enabled": bool(cbam_cfg.get("enabled", False)),
             "cbam_global": bool(cbam_cfg.get("global_branch", False)),
@@ -811,15 +856,22 @@ def _log_config_summary(logger, summary: dict[str, Any]) -> None:
     augmentation = summary["augmentation"]
     logger.info("CONFIG SUMMARY:", extra=_phase_extra("SYSTEM"))
     logger.info("- model type: %s", summary["model_type"], extra=_phase_extra("SYSTEM"))
-    logger.info("- metadata mode: %s", summary["metadata_mode"], extra=_phase_extra("SYSTEM"))
     logger.info(
-        "- structure switches: ensemble=%s | branch=%s | local_mode=%s | target=%s | metadata=%s(%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s]",
+        "- metadata mode: %s | inputs: %s",
+        summary["metadata_mode"],
+        summary["metadata_inputs"],
+        extra=_phase_extra("SYSTEM"),
+    )
+    logger.info(
+        "- structure switches: ensemble=%s | branch=%s | local_mode=%s | target=%s | metadata=%s(%s;g=%s,c=%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s]",
         structure["ensemble_mode"],
         structure["branch_mode"],
         structure["local_branch_mode"],
         structure["target_mode"],
         structure["metadata_enabled"],
         structure["metadata_mode"],
+        structure["metadata_use_gender"],
+        structure["metadata_use_chronological"],
         structure["heatmap_guidance"],
         structure["cbam_enabled"],
         structure["cbam_global"],
@@ -988,6 +1040,9 @@ def _build_effective_params_payload(
         "input_modalities": _describe_input_modalities(config),
         "target_type": _describe_target(config),
         "metadata_mode": str(metadata_cfg.get("mode") or "mlp"),
+        "metadata_inputs": _describe_metadata_inputs(config),
+        "metadata_use_gender": bool(metadata_cfg.get("use_gender", True)),
+        "metadata_use_chronological": bool(metadata_cfg.get("use_chronological", True)),
         "heatmap_guidance": bool((model_cfg.get("heatmap_guidance") or {}).get("enabled", False)),
         "cbam_enabled": bool(cbam_cfg.get("enabled", False)),
         "cbam_global": bool(cbam_cfg.get("global_branch", False)),
@@ -1007,7 +1062,7 @@ def _build_effective_params_payload(
 
 def _log_effective_params(logger, payload: dict[str, Any]) -> None:
     logger.info(
-        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | amp=%s->%s | compile=%s/%s/%s(mode=%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | ensemble=%s | branch=%s | local_mode=%s | metadata=%s(%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s] | input_size=%s | local_patch_size=%s | crop=%s(margin=%s) | sigma=(%s,%s) | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
+        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | amp=%s->%s | compile=%s/%s/%s(mode=%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | ensemble=%s | branch=%s | local_mode=%s | metadata=%s(%s;g=%s,c=%s;inputs=%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s] | input_size=%s | local_patch_size=%s | crop=%s(margin=%s) | sigma=(%s,%s) | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
         payload["experiment_mode"],
         payload["device"],
         payload["epochs"],
@@ -1039,6 +1094,9 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         payload["local_branch_mode"],
         payload["metadata_enabled"],
         payload["metadata_mode"],
+        payload["metadata_use_gender"],
+        payload["metadata_use_chronological"],
+        payload["metadata_inputs"],
         payload["heatmap_guidance"],
         payload["cbam_enabled"],
         payload["cbam_global"],
