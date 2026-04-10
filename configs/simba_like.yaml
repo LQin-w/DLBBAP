@@ -1,32 +1,19 @@
 experiment:
+  name: rhpe_boneage_simba_like
   mode: simba
 
 data:
-  input_size: 448
-  local_patch_size: 80
-  heatmap_sigma_ratio: 0.04
-  heatmap_sigma_min: 8.0
-  global_crop_margin_ratio: 0.04
+  global_crop_mode: full
+  global_crop_margin_ratio: 0.0
 
 model:
+  branch_mode: global_only
   target_mode: relative
+  relative_target_direction: boneage_minus_chronological
   metadata:
-    mode: simba_hybrid
-
-training:
-  optimizer: adam
-  lr: 0.0001
-  weight_decay: 0.00001
-  scheduler: plateau
-  warmup_epochs: 0
-  min_lr: 0.00001
-  loss: l1
-  batch_size: 8
-  val_batch_size: 8
-  test_batch_size: 8
-  gradient_accumulation_steps: 2
-  workers_override: 4
-  prefetch_factor: 2
-  persistent_workers: true
-  pin_memory: true
-  eval_interval: 1
+    enabled: true
+    mode: simba_multiplier
+    use_gender: true
+    use_chronological: true
+  heatmap_guidance:
+    enabled: true

@@ -1,0 +1,5 @@
+这三个目录按 epoch 连续合并为 1-89。
+配置目标为 90 epoch，但在 2026-04-10 的最后一段训练中于 epoch 89/90 提前早停，因此不存在 epoch 90 的 history 行。
+全局最佳指标: val_mae = 9.774040 @ epoch 79.
+最佳模型与最终验证/测试预测文件来源: outputs/90-8-no1-Bonet-master_like_train_20260410_171042
+根目录图像目录: plots_90-8-no1-Bonet-master_like_train_20260410_merged

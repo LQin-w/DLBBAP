@@ -1,0 +1,20 @@
+experiment:
+  name: rhpe_boneage_bonet_master_like
+  mode: bonet_like
+
+data:
+  global_crop_mode: bbox
+  global_crop_margin_ratio: 0.08
+
+model:
+  branch_mode: global_local
+  target_mode: direct
+  metadata:
+    enabled: true
+    mode: mlp
+    use_gender: true
+    use_chronological: false
+  heatmap_guidance:
+    enabled: true
+  local_branch:
+    mode: patch_heatmap

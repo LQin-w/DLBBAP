@@ -1,0 +1,9 @@
+{
+  "image_dir": "/home/lqw/DLBBAP/dataset/RHPE_train",
+  "mean": 0.5805843505750644,
+  "std": 0.3230183726796217,
+  "mean_255": 148.04900939664142,
+  "std_255": 82.36968503330353,
+  "source": "checkpoint",
+  "stats_path": "dataset/dataset/dataset/train_mean_std.json"
+}

@@ -199,6 +199,8 @@ VISIBLE_FIELD_SPECS: tuple[UiFieldSpec, ...] = (
     _enum_field("model.target_mode", "method"),
     _enum_field("model.relative_target_direction", "method", width=28),
     _bool_field("model.metadata.enabled", "method"),
+    _bool_field("model.metadata.use_gender", "method"),
+    _bool_field("model.metadata.use_chronological", "method"),
     _enum_field("model.metadata.mode", "method"),
     _bool_field("model.heatmap_guidance.enabled", "method"),
     _bool_field("model.cbam.enabled", "method"),
@@ -1144,6 +1146,12 @@ class TrainUI:
         return values
 
     def _validate_cross_field_values(self, values: dict[str, Any]) -> None:
+        metadata_enabled = bool(values.get("model.metadata.enabled"))
+        if metadata_enabled:
+            use_gender = bool(values.get("model.metadata.use_gender", True))
+            use_chronological = bool(values.get("model.metadata.use_chronological", True))
+            if not (use_gender or use_chronological):
+                raise ValueError("model.metadata.enabled=true 时，至少需要启用 gender 或 chronological 其中一种元信息。")
         if values.get("data.normalization.source") == "manual":
             mean = values.get("data.normalization.mean")
             std = values.get("data.normalization.std")
@@ -1166,6 +1174,8 @@ class TrainUI:
         ensemble_mode = str(values.get("model.ensemble_mode") or "ensemble").lower()
         metadata_enabled = bool(values.get("model.metadata.enabled"))
         metadata_mode = str(values.get("model.metadata.mode") or "mlp").lower()
+        metadata_use_gender = bool(values.get("model.metadata.use_gender", True))
+        metadata_use_chronological = bool(values.get("model.metadata.use_chronological", True))
         global_branch_enabled = branch_mode in {"global_only", "global_local"}
         local_branch_enabled = branch_mode in {"local_only", "global_local"}
         local_mode = str(values.get("model.local_branch.mode") or "patch_heatmap").lower()
@@ -1189,8 +1199,10 @@ class TrainUI:
             return str(values.get("model.target_mode") or "relative").lower() == "relative"
         if path == "model.metadata.mode":
             return metadata_enabled
+        if path in {"model.metadata.use_gender", "model.metadata.use_chronological"}:
+            return metadata_enabled
         if path in {"model.metadata.hidden_dim", "model.metadata.dropout"}:
-            return metadata_enabled and metadata_mode in {"mlp", "simba_hybrid"}
+            return metadata_enabled and metadata_mode in {"mlp", "simba_hybrid"} and (metadata_use_gender or metadata_use_chronological)
         if path == "model.heatmap_guidance.enabled":
             return global_branch_enabled
         if path == "model.cbam.global_branch":

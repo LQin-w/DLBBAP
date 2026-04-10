@@ -1,0 +1,83 @@
+{
+  "experiment_mode": "bonet_like",
+  "model_type": "EnsembleBoneAgeModel(resnet18 + efficientnet_b0)",
+  "metadata_mode": "mlp",
+  "metadata_inputs": "male",
+  "input_modalities": [
+    "grayscale_global_image",
+    "global_roi_heatmap",
+    "local_patches",
+    "local_heatmaps",
+    "roi_geometry_vector",
+    "male"
+  ],
+  "target_type": "direct boneage regression",
+  "dataset_size": {
+    "train": 5491,
+    "val": 713,
+    "test": 79
+  },
+  "device": "cuda:0",
+  "structure": {
+    "ensemble_mode": "ensemble",
+    "resnet_name": "resnet18",
+    "efficientnet_name": "efficientnet_b0",
+    "pretrained": false,
+    "branch_mode": "global_local",
+    "local_branch_mode": "patch_heatmap",
+    "target_mode": "direct",
+    "relative_target_direction": "boneage_minus_chronological",
+    "metadata_enabled": true,
+    "metadata_mode": "mlp",
+    "metadata_use_gender": true,
+    "metadata_use_chronological": false,
+    "heatmap_guidance": true,
+    "cbam_enabled": true,
+    "cbam_global": true,
+    "cbam_local": true
+  },
+  "data_strategy": {
+    "input_size": 384,
+    "local_patch_size": 96,
+    "global_crop_mode": "bbox",
+    "global_crop_margin_ratio": 0.08,
+    "heatmap_sigma_ratio": 0.035,
+    "heatmap_sigma_min": 8.0,
+    "normalization_source": "checkpoint"
+  },
+  "optimization": {
+    "epochs": 90,
+    "batch_size": 8,
+    "gradient_accumulation_steps": 1,
+    "optimizer": "adamw",
+    "lr": 0.00025,
+    "weight_decay": 0.0005,
+    "scheduler": "cosine",
+    "scheduler_factor": 0.5,
+    "scheduler_patience": 2,
+    "warmup_epochs": 3,
+    "loss": "smoothl1(beta=0.5)",
+    "best_metric": "mae",
+    "amp_requested": true,
+    "compile_requested": false,
+    "compile_mode": "reduce-overhead"
+  },
+  "augmentation": {
+    "affine_p": 0.65,
+    "rotation_limit": 10.0,
+    "translate_limit": 0.04,
+    "scale_limit": 0.1,
+    "shear_limit": 3.0,
+    "horizontal_flip": false,
+    "horizontal_flip_p": 0.5,
+    "use_noise": false,
+    "noise_p": 0.12,
+    "use_blur": false,
+    "blur_p": 0.08
+  },
+  "normalization": {
+    "mean": 0.5805843505750644,
+    "std": 0.3230183726796217,
+    "source": "checkpoint"
+  }
+}
