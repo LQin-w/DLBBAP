@@ -33,6 +33,7 @@ training:
   gradient_accumulation_steps: 1
   compile: true
   compile_mode: reduce-overhead
+  progress_bar: false
   eval_interval: 2
   save_interval: 2
   early_stopping_patience: 6

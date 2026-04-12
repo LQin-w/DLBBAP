@@ -255,6 +255,8 @@ def _log_running_mode(logger, config: dict[str, Any]) -> str:
     target_mode = str((config.get("model") or {}).get("target_mode") or "relative").lower()
     branch_mode = str((config.get("model") or {}).get("branch_mode") or "global_local").lower()
     metadata_cfg = (config.get("model") or {}).get("metadata") or {}
+    heatmap_guidance_enabled = bool(((config.get("model") or {}).get("heatmap_guidance") or {}).get("enabled", False))
+    global_crop_mode = str((config.get("data") or {}).get("global_crop_mode") or "bbox").lower()
     metadata_enabled = bool(metadata_cfg.get("enabled", True))
     use_gender = bool(metadata_cfg.get("use_gender", True))
     use_chronological = bool(metadata_cfg.get("use_chronological", True))
@@ -272,7 +274,8 @@ def _log_running_mode(logger, config: dict[str, Any]) -> str:
         if not use_chronological:
             logger.warning("experiment.mode=simba 但未启用 chronological metadata；这会削弱 SIMBA 的相对骨龄设定。")
     if mode == "bonet_like":
-        if branch_mode == "global_only":
+        bonet_global_only_like = branch_mode == "global_only" and heatmap_guidance_enabled and global_crop_mode == "bbox"
+        if branch_mode == "global_only" and not bonet_global_only_like:
             logger.warning("experiment.mode=bonet_like 但 model.branch_mode=global_only；局部分支未启用，无法体现 ROI/keypoints/local patches。")
         if target_mode != "direct":
             logger.warning("experiment.mode=bonet_like 但 model.target_mode=%s；原始 BoNet 更接近直接骨龄回归。", target_mode)
@@ -1001,6 +1004,7 @@ def _build_effective_params_payload(
         "scheduler": str(training_cfg.get("scheduler") or "none").lower(),
         "scheduler_factor": float(training_cfg.get("scheduler_factor", 0.5) or 0.5),
         "scheduler_patience": int(training_cfg.get("scheduler_patience", 2) or 2),
+        "scheduler_cooldown": int(training_cfg.get("scheduler_cooldown", 0) or 0),
         "warmup_epochs": warmup_epochs,
         "warmup_start_factor": warmup_start_factor,
         "min_lr": float(training_cfg["min_lr"]),
@@ -1062,7 +1066,7 @@ def _build_effective_params_payload(
 
 def _log_effective_params(logger, payload: dict[str, Any]) -> None:
     logger.info(
-        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s] | warmup_epochs=%s | amp=%s->%s | compile=%s/%s/%s(mode=%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | ensemble=%s | branch=%s | local_mode=%s | metadata=%s(%s;g=%s,c=%s;inputs=%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s] | input_size=%s | local_patch_size=%s | crop=%s(margin=%s) | sigma=(%s,%s) | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
+        "Effective params | mode=%s | device=%s | epochs=%s | batch_size=%s | effective_batch_size=%s | optimizer=%s | lr=%s | weight_decay=%s | scheduler=%s[factor=%s,patience=%s,cooldown=%s] | warmup_epochs=%s | amp=%s->%s | compile=%s/%s/%s(mode=%s) | channels_last=%s | eval_interval=%s | early_stopping_patience=%s | num_workers=%s | pin_memory=%s | persistent_workers=%s | prefetch_factor=%s | verify_images=%s | ensemble=%s | branch=%s | local_mode=%s | metadata=%s(%s;g=%s,c=%s;inputs=%s) | heatmap_guidance=%s | cbam=%s[g=%s,l=%s] | input_size=%s | local_patch_size=%s | crop=%s(margin=%s) | sigma=(%s,%s) | target_type=%s | normalization=(%s,%s,%s) | dataset_sizes=%s",
         payload["experiment_mode"],
         payload["device"],
         payload["epochs"],
@@ -1074,6 +1078,7 @@ def _log_effective_params(logger, payload: dict[str, Any]) -> None:
         payload["scheduler"],
         _format_scalar(payload["scheduler_factor"], precision=3),
         payload["scheduler_patience"],
+        payload["scheduler_cooldown"],
         payload["warmup_epochs"],
         payload["amp_requested"],
         payload["amp_actually_used"],
@@ -1388,6 +1393,7 @@ def _build_scheduler(optimizer, config: dict[str, Any]):
     min_lr = float(training_cfg["min_lr"])
     scheduler_factor = min(max(float(training_cfg.get("scheduler_factor", 0.5) or 0.5), 1e-4), 0.9999)
     scheduler_patience = _resolve_non_negative_int(training_cfg.get("scheduler_patience"), default=2)
+    scheduler_cooldown = _resolve_non_negative_int(training_cfg.get("scheduler_cooldown"), default=0)
     warmup_epochs, _ = _resolve_warmup_settings(config, int(training_cfg["epochs"]))
     if name == "plateau":
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -1395,6 +1401,7 @@ def _build_scheduler(optimizer, config: dict[str, Any]):
             mode="min",
             factor=scheduler_factor,
             patience=scheduler_patience,
+            cooldown=scheduler_cooldown,
             min_lr=min_lr,
         )
     if name == "cosine":
